@@ -1,0 +1,34 @@
+[project]
+name = "simloop"
+version = "0.0.1.dev0"
+description = "Deterministic simulation testing for Python asyncio: seeded scheduling, virtual time, replayable failures"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Dhruv Kumar Singh", email = "dsingh32@binghamton.edu" }]
+keywords = ["asyncio", "testing", "deterministic", "simulation", "dst"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Testing",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8", "mypy>=1.11"]
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+strict = true
+files = ["src", "tests"]
