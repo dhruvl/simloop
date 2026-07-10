@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import heapq
 import random
 import sys
@@ -64,6 +65,9 @@ class SimLoop(asyncio.AbstractEventLoop):
         self._running = False
         self._closed = False
         self._stopping = False
+        # Exceptions from callbacks and fire-and-forget tasks accumulate here
+        # and are re-raised from run_until_complete once the loop stops.
+        self._unhandled: list[BaseException] = []
 
     # ------------------------------------------------------------------
     # Introspection
@@ -178,11 +182,36 @@ class SimLoop(asyncio.AbstractEventLoop):
             self.run_forever()
         finally:
             fut.remove_done_callback(self._stop_when_done)
-        if not fut.done():
+        completed = fut.done()
+        if not completed:
+            # Cancel the stalled task and step until it has processed the
+            # cancellation, so it is never left pending for the garbage
+            # collector to complain about. Draining stops as soon as no work
+            # remains, keeping the seeded draw the only source of order.
+            fut.cancel()
+            while (self._ready or self._timers) and not fut.done():
+                self._step()
+        # A fire-and-forget task that failed keeps itself alive through a
+        # reference cycle (its exception's traceback pins the coroutine frame),
+        # so its exception only reaches call_exception_handler when the cycle
+        # collector finalizes it. Force that here, before the boundary check,
+        # so an orphaned failure cannot slip past a run that otherwise looks
+        # successful. This touches neither the clock nor the seeded draw.
+        gc.collect()
+        if not completed:
+            # A collected failure explains the stall better than the generic
+            # deadlock diagnosis, so it takes precedence here.
+            if self._unhandled:
+                raise self._unhandled[0]
             raise SimulationDeadlockError(
                 "the awaited future never completed: all tasks are blocked"
             )
-        return fut.result()
+        # The awaited task's own outcome wins: its exception propagates as-is,
+        # and only a normal return falls through to the orphaned failures.
+        result = fut.result()
+        if self._unhandled:
+            raise self._unhandled[0]
+        return result
 
     def _stop_when_done(self, fut: asyncio.Future[Any]) -> None:
         self.stop()
@@ -227,12 +256,20 @@ class SimLoop(asyncio.AbstractEventLoop):
     # ------------------------------------------------------------------
 
     def call_exception_handler(self, context: dict[str, Any]) -> None:
-        # A simulation must not swallow errors: re-raise so the failure
-        # surfaces at the run_until_complete call site.
+        # A simulation must not swallow errors. Collect real failures so that
+        # run_until_complete re-raises them once the loop stops. This covers
+        # fire-and-forget tasks, whose exceptions otherwise reach here only
+        # from Task.__del__ at GC time, where a raise would be unraisable and
+        # the run would falsely report success. Message-only contexts (e.g. a
+        # still-pending task being destroyed) are informational, not failures:
+        # they go to stderr and must never abort an otherwise successful run.
         exc = context.get("exception")
         if isinstance(exc, BaseException):
-            raise exc
-        print("simloop:", context.get("message", "unhandled error"), file=sys.stderr)
+            self._unhandled.append(exc)
+        else:
+            print(
+                "simloop:", context.get("message", "unhandled error"), file=sys.stderr
+            )
 
     def default_exception_handler(self, context: dict[str, Any]) -> None:
         self.call_exception_handler(context)

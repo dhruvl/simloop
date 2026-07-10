@@ -35,6 +35,10 @@ class TraceRecorder:
     def hash(self) -> str:
         digest = hashlib.sha256()
         for event in self._events:
+            # Labels are always qualified callback names, never free-form text,
+            # so they cannot contain the "|" field separator or a newline. That
+            # keeps this delimiter-based serialization injective: two distinct
+            # event streams can never collide onto the same byte sequence.
             line = f"{event.kind}|{event.when!r}|{event.seq}|{event.label}\n"
             digest.update(line.encode("utf-8"))
         return digest.hexdigest()

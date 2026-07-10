@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import time
 
 import pytest
@@ -103,6 +104,60 @@ def test_unhandled_callback_exception_propagates() -> None:
     loop = SimLoop(seed=0)
     try:
         with pytest.raises(ValueError, match="boom"):
+            loop.run_until_complete(main())
+    finally:
+        loop.close()
+
+
+def test_failing_background_task_surfaces_from_run() -> None:
+    async def fail() -> None:
+        raise ValueError("background boom")
+
+    async def main() -> str:
+        asyncio.create_task(fail())
+        await asyncio.sleep(1.0)
+        return "finished"
+
+    loop = SimLoop(seed=0)
+    try:
+        with pytest.raises(ValueError, match="background boom"):
+            loop.run_until_complete(main())
+    finally:
+        loop.close()
+
+
+def test_pending_background_task_does_not_fail_the_run(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    async def main() -> str:
+        asyncio.create_task(asyncio.sleep(100))
+        await asyncio.sleep(0)
+        return "finished"
+
+    loop = SimLoop(seed=0)
+    try:
+        assert loop.run_until_complete(main()) == "finished"
+    finally:
+        loop.close()
+    # Dropping the loop finalizes the still-pending task; the destroy notice
+    # must land on stderr instead of failing the (successful) run.
+    del loop
+    gc.collect()
+    assert "Task was destroyed but it is pending!" in capsys.readouterr().err
+
+
+def test_main_task_exception_wins_over_background_failure() -> None:
+    async def fail() -> None:
+        raise KeyError("background")
+
+    async def main() -> None:
+        asyncio.create_task(fail())
+        await asyncio.sleep(1.0)
+        raise ValueError("main boom")
+
+    loop = SimLoop(seed=0)
+    try:
+        with pytest.raises(ValueError, match="main boom"):
             loop.run_until_complete(main())
     finally:
         loop.close()
