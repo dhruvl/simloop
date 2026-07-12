@@ -46,6 +46,14 @@ def _fence(api: str) -> NoReturn:
     )
 
 
+def _reject_kwargs(api: str, kwargs: dict[str, Any]) -> None:
+    # Optional stdlib arguments (ssl, sock, interface selectors, ...) reach
+    # outside the simulation; anything actually requested must fail loudly.
+    for name, value in kwargs.items():
+        if value:
+            _fence(f"{api}({name}=...)")
+
+
 def _label(callback: Callable[..., object]) -> str:
     # Labels feed the trace hash, so they must be stable across processes:
     # qualified names only, never repr() (which can embed memory addresses).
@@ -308,6 +316,18 @@ class SimLoop(asyncio.AbstractEventLoop):
         self._net._register_task(task)
         return task
 
+    async def create_datagram_endpoint(
+        self,
+        protocol_factory: Any,
+        local_addr: Any = None,
+        remote_addr: Any = None,
+        **kwargs: Any,
+    ) -> Any:
+        _reject_kwargs("create_datagram_endpoint", kwargs)
+        return await self._net._open_datagram_endpoint(
+            protocol_factory, local_addr, remote_addr
+        )
+
     def set_task_factory(self, factory: _TaskFactory | None) -> None:
         if factory is not None and not callable(factory):
             raise TypeError("task factory must be a callable or None")
@@ -453,9 +473,6 @@ class SimLoop(asyncio.AbstractEventLoop):
 
     def sock_sendfile(self, *args: Any, **kwargs: Any) -> Any:
         _fence("sock_sendfile")
-
-    def create_datagram_endpoint(self, *args: Any, **kwargs: Any) -> Any:
-        _fence("create_datagram_endpoint")
 
     def connect_read_pipe(self, *args: Any, **kwargs: Any) -> Any:
         _fence("connect_read_pipe")
