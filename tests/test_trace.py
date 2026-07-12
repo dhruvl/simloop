@@ -27,3 +27,11 @@ def test_different_order_hashes_differently() -> None:
     second.record("run", 0.0, 1, "g")
     second.record("run", 0.0, 0, "f")
     assert first.hash() != second.hash()
+
+
+def test_cancel_events_change_the_hash() -> None:
+    first, second = TraceRecorder(), TraceRecorder()
+    first.record("run", 0.0, 0, "f")
+    second.record("run", 0.0, 0, "f")
+    second.record("cancel", 0.0, 1, "g")
+    assert first.hash() != second.hash()

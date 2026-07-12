@@ -189,3 +189,55 @@ def test_trace_is_recorded() -> None:
     kinds = {event.kind for event in loop.trace}
     assert kinds == {"schedule", "run", "advance"}
     assert len(loop.trace_hash()) == 64
+
+
+def test_cancelled_callback_is_traced_not_run() -> None:
+    fired: list[str] = []
+
+    async def main() -> None:
+        loop = asyncio.get_running_loop()
+        handle = loop.call_soon(fired.append, "x")
+        handle.cancel()
+        await asyncio.sleep(1.0)
+
+    loop = SimLoop(seed=0)
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()
+    assert fired == []
+    assert "cancel" in {event.kind for event in loop.trace}
+
+
+def test_cancelled_timer_is_traced() -> None:
+    async def main() -> None:
+        loop = asyncio.get_running_loop()
+        timer = loop.call_later(1.0, print, "never")
+        timer.cancel()
+        timer.cancel()
+        await asyncio.sleep(2.0)
+
+    loop = SimLoop(seed=0)
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()
+    cancels = [event for event in loop.trace if event.kind == "cancel"]
+    assert len(cancels) == 1
+
+
+def test_call_at_in_the_past_runs_at_current_time() -> None:
+    fired: list[float] = []
+
+    async def main() -> None:
+        loop = asyncio.get_running_loop()
+        await asyncio.sleep(5.0)
+        loop.call_at(1.0, lambda: fired.append(loop.time()))
+        await asyncio.sleep(0.1)
+
+    loop = SimLoop(seed=0)
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()
+    assert fired == [5.0]

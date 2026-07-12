@@ -10,7 +10,7 @@ import hashlib
 from dataclasses import dataclass
 from typing import Literal
 
-EventKind = Literal["schedule", "run", "advance"]
+EventKind = Literal["schedule", "run", "advance", "cancel"]
 
 
 @dataclass(frozen=True, slots=True)

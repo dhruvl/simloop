@@ -154,13 +154,17 @@ class SimLoop(asyncio.AbstractEventLoop):
         index = self._rng.randrange(len(self._ready))
         seq, label, handle = self._ready.pop(index)
         if handle.cancelled():
+            # The draw itself is a scheduling decision, so a skipped handle
+            # must appear in the trace for the replay proof to stay complete.
+            self._recorder.record("cancel", self._now, seq, label)
             return
         self._recorder.record("run", self._now, seq, label)
         handle._run()
 
     def _advance_clock(self) -> None:
         while self._timers and self._timers[0][3].cancelled():
-            heapq.heappop(self._timers)
+            _, seq, label, _timer = heapq.heappop(self._timers)
+            self._recorder.record("cancel", self._now, seq, label)
         if not self._timers:
             raise SimulationDeadlockError(
                 "nothing left to run: no ready callbacks and no pending timers"
@@ -169,7 +173,9 @@ class SimLoop(asyncio.AbstractEventLoop):
         self._recorder.record("advance", self._now, -1, "")
         while self._timers and self._timers[0][0] <= self._now:
             _, seq, label, timer = heapq.heappop(self._timers)
-            if not timer.cancelled():
+            if timer.cancelled():
+                self._recorder.record("cancel", self._now, seq, label)
+            else:
                 self._ready.append((seq, label, timer))
 
     # ------------------------------------------------------------------
