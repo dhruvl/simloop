@@ -33,4 +33,4 @@ markers = ["slow: long-running replay-stability checks"]
 
 [tool.mypy]
 strict = true
-files = ["src", "tests"]
+files = ["src", "tests", "benchmarks"]
