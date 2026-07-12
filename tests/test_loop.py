@@ -1,6 +1,7 @@
 import asyncio
 import gc
 import time
+from typing import Any, cast
 
 import pytest
 
@@ -241,3 +242,74 @@ def test_call_at_in_the_past_runs_at_current_time() -> None:
     finally:
         loop.close()
     assert fired == [5.0]
+
+
+def test_custom_exception_handler_takes_responsibility() -> None:
+    seen: list[dict[str, Any]] = []
+
+    async def fail() -> None:
+        raise ValueError("handled elsewhere")
+
+    async def main() -> str:
+        asyncio.create_task(fail())
+        await asyncio.sleep(1.0)
+        return "finished"
+
+    loop = SimLoop(seed=0)
+    loop.set_exception_handler(lambda _loop, context: seen.append(context))
+    try:
+        assert loop.run_until_complete(main()) == "finished"
+    finally:
+        loop.close()
+    assert len(seen) == 1
+    assert isinstance(seen[0].get("exception"), ValueError)
+
+
+def test_broken_exception_handler_fails_the_run() -> None:
+    def broken(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+        raise KeyError("handler bug")
+
+    async def fail() -> None:
+        raise ValueError("original")
+
+    async def main() -> None:
+        asyncio.create_task(fail())
+        await asyncio.sleep(1.0)
+
+    loop = SimLoop(seed=0)
+    loop.set_exception_handler(broken)
+    try:
+        with pytest.raises(KeyError, match="handler bug"):
+            loop.run_until_complete(main())
+    finally:
+        loop.close()
+
+
+def test_clearing_the_handler_restores_failing_by_default() -> None:
+    async def fail() -> None:
+        raise ValueError("must surface")
+
+    async def main() -> None:
+        asyncio.create_task(fail())
+        await asyncio.sleep(1.0)
+
+    loop = SimLoop(seed=0)
+    handler = lambda _loop, _context: None  # noqa: E731
+    loop.set_exception_handler(handler)
+    assert loop.get_exception_handler() is handler
+    loop.set_exception_handler(None)
+    assert loop.get_exception_handler() is None
+    try:
+        with pytest.raises(ValueError, match="must surface"):
+            loop.run_until_complete(main())
+    finally:
+        loop.close()
+
+
+def test_non_callable_exception_handler_is_rejected() -> None:
+    loop = SimLoop(seed=0)
+    try:
+        with pytest.raises(TypeError):
+            loop.set_exception_handler(cast(Any, 42))
+    finally:
+        loop.close()

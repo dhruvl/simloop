@@ -16,6 +16,8 @@ from simloop._trace import TraceEvent, TraceRecorder
 
 _Ts = TypeVarTuple("_Ts")
 
+_ExceptionHandler = Callable[[asyncio.AbstractEventLoop, dict[str, Any]], object]
+
 
 class SimulationDeadlockError(RuntimeError):
     """No runnable callbacks or timers remain, but the awaited future is not done.
@@ -83,6 +85,7 @@ class SimLoop(asyncio.AbstractEventLoop):
         # Exceptions from callbacks and fire-and-forget tasks accumulate here
         # and are re-raised from run_until_complete once the loop stops.
         self._unhandled: list[BaseException] = []
+        self._exception_handler: _ExceptionHandler | None = None
 
     # ------------------------------------------------------------------
     # Introspection
@@ -276,7 +279,32 @@ class SimLoop(asyncio.AbstractEventLoop):
     # Error handling
     # ------------------------------------------------------------------
 
+    def set_exception_handler(self, handler: _ExceptionHandler | None) -> None:
+        if handler is not None and not callable(handler):
+            raise TypeError(
+                f"a callable object or None is expected, got {handler!r}"
+            )
+        self._exception_handler = handler
+
+    def get_exception_handler(self) -> _ExceptionHandler | None:
+        return self._exception_handler
+
     def call_exception_handler(self, context: dict[str, Any]) -> None:
+        if self._exception_handler is None:
+            self.default_exception_handler(context)
+            return
+        try:
+            self._exception_handler(self, context)
+        except (SystemExit, KeyboardInterrupt):
+            raise
+        except BaseException as handler_error:
+            # A broken exception handler is itself a failure that must not
+            # vanish: surface it, and fall back to the default policy for
+            # the original context.
+            self._unhandled.append(handler_error)
+            self.default_exception_handler(context)
+
+    def default_exception_handler(self, context: dict[str, Any]) -> None:
         # A simulation must not swallow errors. Collect real failures so that
         # run_until_complete re-raises them once the loop stops. This covers
         # fire-and-forget tasks, whose exceptions otherwise reach here only
@@ -291,9 +319,6 @@ class SimLoop(asyncio.AbstractEventLoop):
             print(
                 "simloop:", context.get("message", "unhandled error"), file=sys.stderr
             )
-
-    def default_exception_handler(self, context: dict[str, Any]) -> None:
-        self.call_exception_handler(context)
 
     def get_debug(self) -> bool:
         return False
@@ -366,12 +391,6 @@ class SimLoop(asyncio.AbstractEventLoop):
 
     def get_task_factory(self, *args: Any, **kwargs: Any) -> Any:
         _fence("get_task_factory")
-
-    def set_exception_handler(self, *args: Any, **kwargs: Any) -> Any:
-        _fence("set_exception_handler")
-
-    def get_exception_handler(self, *args: Any, **kwargs: Any) -> Any:
-        _fence("get_exception_handler")
 
     def shutdown_asyncgens(self, *args: Any, **kwargs: Any) -> Any:
         _fence("shutdown_asyncgens")
