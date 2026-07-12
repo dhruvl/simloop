@@ -73,6 +73,13 @@ class SimLoop(asyncio.AbstractEventLoop):
     def __init__(self, seed: int = 0) -> None:
         self._seed = seed
         self._rng = random.Random(seed)
+        # Streams for user-facing entropy, derived from the seed but kept
+        # separate from the scheduler's RNG: user draws must never perturb
+        # scheduling order, and scheduling must never perturb user values.
+        # String seeding hashes via SHA-512, so the streams are stable
+        # across processes and interpreter versions.
+        self._user_random = random.Random(f"{seed}:random")
+        self._uuid_random = random.Random(f"{seed}:uuid")
         self._now = 0.0
         # Ready entries are (seq, label, handle); seq is a global creation
         # counter that gives every scheduled callback a stable identity.
