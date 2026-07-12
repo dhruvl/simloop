@@ -10,6 +10,7 @@ an implicit ``driver`` host, so test glue needs no ceremony.
 from __future__ import annotations
 
 import random
+from collections.abc import Iterable
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -164,6 +165,8 @@ class SimNetwork:
         self._default_drop = 0.0
         self._default_duplicate = 0.0
         self._links: dict[tuple[str, str], _Link] = {}
+        self._cuts: set[frozenset[str]] = set()
+        self._held: list[_Packet] = []
         self._datagrams: dict[tuple[str, int], _SimDatagramTransport] = {}
         self._listeners: dict[tuple[str, int], _Listener] = {}
         self._streams: dict[tuple[int, str], _SimStreamTransport] = {}
@@ -221,6 +224,42 @@ class SimNetwork:
         if duplicate is not None:
             link.duplicate = _check_probability("duplicate", duplicate)
 
+    def partition(self, group_a: Iterable[str], group_b: Iterable[str]) -> None:
+        side_a = [self._require_host(name) for name in group_a]
+        side_b = [self._require_host(name) for name in group_b]
+        if not side_a or not side_b:
+            raise ValueError("both partition groups must be non-empty")
+        overlap = set(side_a) & set(side_b)
+        if overlap:
+            raise ValueError(
+                f"hosts cannot be on both sides of a partition: {sorted(overlap)}"
+            )
+        for a in side_a:
+            for b in side_b:
+                self._cuts.add(frozenset((a, b)))
+
+    def heal(self) -> None:
+        self._cuts.clear()
+        held, self._held = self._held, []
+        for packet in held:
+            self._trace("release", packet)
+            self._transmit(packet)
+
+    def _is_cut(self, a: str, b: str) -> bool:
+        return frozenset((a, b)) in self._cuts
+
+    def _blackhole(self, packet: _Packet) -> None:
+        # Datagrams crossing a cut are simply gone. Stream packets are held
+        # and released on heal: with no retransmission model, permanently
+        # dropping a mid-stream packet would leave the receiver waiting on a
+        # sequence gap forever, so held-then-released is what "the bytes stop
+        # flowing, then the connection resumes intact" has to mean here.
+        if packet.kind == "dgram":
+            self._trace("drop", packet)
+        else:
+            self._held.append(packet)
+            self._trace("hold", packet)
+
     def _resolved(self, src: str, dst: str) -> tuple[tuple[float, float], float, float]:
         link = self._links.get((src, dst))
         if link is None:
@@ -251,6 +290,9 @@ class SimNetwork:
         )
 
     def _transmit(self, packet: _Packet) -> None:
+        if self._is_cut(packet.src, packet.dst):
+            self._blackhole(packet)
+            return
         latency, drop, duplicate = self._resolved(packet.src, packet.dst)
         if packet.kind == "dgram":
             # Only datagrams are lossy: a reliable stream that loses bytes
@@ -271,6 +313,10 @@ class SimNetwork:
     def _deliver(self, packet: _Packet) -> None:
         if not (self._alive[packet.src] and self._alive[packet.dst]):
             self._trace("lost", packet)
+            return
+        if self._is_cut(packet.src, packet.dst):
+            # The cut appeared while this packet was in flight.
+            self._blackhole(packet)
             return
         # Anything the receiving protocol schedules (including tasks spawned
         # from connection_made or datagram_received) must be pinned to the

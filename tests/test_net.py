@@ -239,3 +239,72 @@ def test_duplicate_datagram_bind_is_rejected() -> None:
         loop.run_until_complete(main())
     finally:
         loop.close()
+
+
+def test_partition_blackholes_datagrams_and_heal_restores() -> None:
+    loop = SimLoop(seed=0)
+    alpha = loop.net.host("alpha")
+    beta = loop.net.host("beta")
+
+    async def main() -> list[tuple[bytes, tuple[str, int]]]:
+        transport_a, collector = await _bound_endpoint(alpha, 7000)
+        transport_b, _ = await _bound_endpoint(beta, 7001)
+        loop.net.partition({"alpha"}, {"beta"})
+        transport_b.sendto(b"during", ("alpha", 7000))
+        await asyncio.sleep(0.5)
+        loop.net.heal()
+        transport_b.sendto(b"after", ("alpha", 7000))
+        await asyncio.sleep(0.5)
+        transport_a.close()
+        transport_b.close()
+        await asyncio.sleep(0.01)
+        return collector.received
+
+    try:
+        received = loop.run_until_complete(main())
+    finally:
+        loop.close()
+    assert received == [(b"after", ("beta", 7001))]
+    labels = [e.label for e in loop.trace if e.kind == "net"]
+    assert "drop beta>alpha" in labels
+
+
+def test_partition_validation() -> None:
+    loop = SimLoop(seed=0)
+    try:
+        net = loop.net
+        net.host("alpha")
+        net.host("beta")
+        with pytest.raises(OSError, match="unknown host"):
+            net.partition({"alpha"}, {"ghost"})
+        with pytest.raises(ValueError, match="both sides"):
+            net.partition({"alpha"}, {"alpha", "beta"})
+        with pytest.raises(ValueError, match="non-empty"):
+            net.partition(set(), {"alpha"})
+    finally:
+        loop.close()
+
+
+def test_driver_is_unaffected_by_partitions_it_is_not_named_in() -> None:
+    loop = SimLoop(seed=0)
+    alpha = loop.net.host("alpha")
+    loop.net.host("beta")
+    loop.net.partition({"alpha"}, {"beta"})
+
+    async def main() -> list[tuple[bytes, tuple[str, int]]]:
+        transport_a, collector = await _bound_endpoint(alpha, 7000)
+        driver_transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(
+            _Collector, local_addr=("0.0.0.0", 7002)
+        )
+        driver_transport.sendto(b"hello", ("alpha", 7000))
+        await asyncio.sleep(0.5)
+        transport_a.close()
+        driver_transport.close()
+        await asyncio.sleep(0.01)
+        return collector.received
+
+    try:
+        received = loop.run_until_complete(main())
+    finally:
+        loop.close()
+    assert received == [(b"hello", ("driver", 7002))]

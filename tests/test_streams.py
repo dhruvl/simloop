@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from simloop import SimLoop
+from simloop import SimLoop, SimulationDeadlockError
 
 
 def _network(seed: int = 0) -> SimLoop:
@@ -305,3 +305,82 @@ def test_connect_cancelled_in_accept_window_leaves_nothing_connected() -> None:
     assert made == ["made"]  # the accept window really was reached
     assert not any(key[1] == "client" for key in loop.net._streams)
     assert len(server_lost) == 1 and isinstance(server_lost[0], ConnectionResetError)
+
+
+def test_connect_across_partition_hangs_until_timeout() -> None:
+    # The syn is held before any listener lookup happens, so no server is
+    # needed to observe the hang: only the connector's own timeout fires.
+    loop = _network()
+    loop.net.partition({"server"}, {"client"})
+
+    async def connect() -> None:
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(1.0):
+                await asyncio.open_connection("server", 9000)
+
+    async def main() -> None:
+        await loop.net.host("client").create_task(connect())
+
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()
+
+
+def test_connect_across_partition_without_timeout_is_a_deadlock() -> None:
+    # No timer is pending while the syn is held, so the run can never make
+    # progress — exactly the missing-timeout bug this tool exists to expose.
+    # Single top-level task on purpose: run_until_complete cancels and reaps
+    # only its own future on the stall path, so this stays stderr-clean.
+    loop = _network()
+    loop.net.partition({"server"}, {"driver"})
+
+    async def connect() -> None:
+        await asyncio.open_connection("server", 9000)
+
+    try:
+        with pytest.raises(SimulationDeadlockError):
+            loop.run_until_complete(connect())
+    finally:
+        loop.close()
+
+
+def test_stream_goes_silent_under_partition_and_resumes_after_heal() -> None:
+    loop = _network()
+
+    async def main() -> bytes:
+        running = asyncio.get_running_loop()
+
+        async def serve() -> None:
+            server = await asyncio.start_server(_echo_lines, "0.0.0.0", 9000)
+            async with server:
+                await asyncio.sleep(10.0)
+
+        async def request() -> bytes:
+            reader, writer = await asyncio.open_connection("server", 9000)
+            loop.net.partition({"server"}, {"client"})
+            writer.write(b"during\n")
+            with pytest.raises(TimeoutError):
+                async with asyncio.timeout(1.0):
+                    await reader.readline()
+            running.call_later(1.0, loop.net.heal)
+            line = await reader.readline()  # released bytes arrive after heal
+            writer.close()
+            await writer.wait_closed()
+            return line
+
+        serve_task = loop.net.host("server").create_task(serve())
+        await asyncio.sleep(0.01)
+        line: bytes = await loop.net.host("client").create_task(request())
+        await _reap(serve_task)
+        await asyncio.sleep(0.01)  # let the echoed connection's own fin land
+        return line
+
+    try:
+        line = loop.run_until_complete(main())
+    finally:
+        loop.close()
+    assert line == b"DURING\n"
+    labels = [e.label for e in loop.trace if e.kind == "net"]
+    assert "hold client>server" in labels
+    assert "release client>server" in labels
