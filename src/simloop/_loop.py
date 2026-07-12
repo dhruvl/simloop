@@ -10,7 +10,10 @@ import sys
 from asyncio import events
 from collections.abc import Callable
 from contextvars import Context
-from typing import Any, NoReturn, TypeVarTuple, Unpack
+from typing import TYPE_CHECKING, Any, NoReturn, TypeVarTuple, Unpack
+
+if TYPE_CHECKING:
+    from asyncio.events import _TaskFactory
 
 from simloop._trace import TraceEvent, TraceRecorder
 
@@ -86,6 +89,7 @@ class SimLoop(asyncio.AbstractEventLoop):
         # and are re-raised from run_until_complete once the loop stops.
         self._unhandled: list[BaseException] = []
         self._exception_handler: _ExceptionHandler | None = None
+        self._task_factory: _TaskFactory | None = None
 
     # ------------------------------------------------------------------
     # Introspection
@@ -273,7 +277,27 @@ class SimLoop(asyncio.AbstractEventLoop):
         context: Context | None = None,
     ) -> asyncio.Task[Any]:
         self._check_closed()
-        return asyncio.Task(coro, loop=self, name=name, context=context)
+        if self._task_factory is None:
+            return asyncio.Task(coro, loop=self, name=name, context=context)
+        factory: Any = self._task_factory
+        task: asyncio.Task[Any] = (
+            factory(self, coro)
+            if context is None
+            else factory(self, coro, context=context)
+        )
+        if name is not None:
+            set_name = getattr(task, "set_name", None)
+            if set_name is not None:
+                set_name(name)
+        return task
+
+    def set_task_factory(self, factory: _TaskFactory | None) -> None:
+        if factory is not None and not callable(factory):
+            raise TypeError("task factory must be a callable or None")
+        self._task_factory = factory
+
+    def get_task_factory(self) -> _TaskFactory | None:
+        return self._task_factory
 
     # ------------------------------------------------------------------
     # Error handling
@@ -385,12 +409,6 @@ class SimLoop(asyncio.AbstractEventLoop):
 
     def set_default_executor(self, *args: Any, **kwargs: Any) -> Any:
         _fence("set_default_executor")
-
-    def set_task_factory(self, *args: Any, **kwargs: Any) -> Any:
-        _fence("set_task_factory")
-
-    def get_task_factory(self, *args: Any, **kwargs: Any) -> Any:
-        _fence("get_task_factory")
 
     def shutdown_asyncgens(self, *args: Any, **kwargs: Any) -> Any:
         _fence("shutdown_asyncgens")

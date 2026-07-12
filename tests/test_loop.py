@@ -1,4 +1,5 @@
 import asyncio
+import contextvars
 import gc
 import time
 from typing import Any, cast
@@ -311,5 +312,81 @@ def test_non_callable_exception_handler_is_rejected() -> None:
     try:
         with pytest.raises(TypeError):
             loop.set_exception_handler(cast(Any, 42))
+    finally:
+        loop.close()
+
+
+def test_task_factory_is_used_by_create_task() -> None:
+    created: list[asyncio.Task[Any]] = []
+
+    def factory(loop: asyncio.AbstractEventLoop, coro: Any) -> asyncio.Task[Any]:
+        task = asyncio.Task(coro, loop=loop)
+        created.append(task)
+        return task
+
+    async def add(a: int, b: int) -> int:
+        return a + b
+
+    async def main() -> int:
+        task = asyncio.get_running_loop().create_task(add(2, 3), name="adder")
+        return await task
+
+    loop = SimLoop(seed=0)
+    loop.set_task_factory(factory)
+    try:
+        assert loop.get_task_factory() is factory
+        assert loop.run_until_complete(main()) == 5
+    finally:
+        loop.close()
+    assert any(task.get_name() == "adder" for task in created)
+
+
+def test_task_factory_receives_context_kwarg() -> None:
+    received: list[dict[str, Any]] = []
+
+    def factory(
+        loop: asyncio.AbstractEventLoop, coro: Any, **kwargs: Any
+    ) -> asyncio.Task[Any]:
+        received.append(kwargs)
+        return asyncio.Task(coro, loop=loop, **kwargs)
+
+    async def noop() -> None:
+        return None
+
+    async def main() -> None:
+        loop = asyncio.get_running_loop()
+        await loop.create_task(noop())
+        await loop.create_task(noop(), context=contextvars.copy_context())
+
+    loop = SimLoop(seed=0)
+    loop.set_task_factory(factory)
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()
+    kw_sets = [set(kwargs) for kwargs in received]
+    assert set() in kw_sets  # a call with no context kwarg
+    assert {"context"} in kw_sets  # the context-carrying call
+
+
+def test_clearing_the_task_factory_restores_default() -> None:
+    async def add(a: int, b: int) -> int:
+        return a + b
+
+    loop = SimLoop(seed=0)
+    loop.set_task_factory(lambda loop, coro: asyncio.Task(coro, loop=loop))
+    loop.set_task_factory(None)
+    try:
+        assert loop.get_task_factory() is None
+        assert loop.run_until_complete(add(2, 3)) == 5
+    finally:
+        loop.close()
+
+
+def test_non_callable_task_factory_is_rejected() -> None:
+    loop = SimLoop(seed=0)
+    try:
+        with pytest.raises(TypeError):
+            loop.set_task_factory(cast(Any, 42))
     finally:
         loop.close()
