@@ -10,7 +10,7 @@ import sys
 from asyncio import events
 from collections.abc import Callable
 from contextvars import Context
-from typing import Any, TypeVarTuple, Unpack
+from typing import Any, NoReturn, TypeVarTuple, Unpack
 
 from simloop._trace import TraceEvent, TraceRecorder
 
@@ -23,6 +23,21 @@ class SimulationDeadlockError(RuntimeError):
     This usually means a lost wakeup: some task is waiting on a future or queue
     that nothing will ever complete.
     """
+
+
+class SimulationFenceError(NotImplementedError):
+    """The code under simulation touched an asyncio API simloop does not simulate.
+
+    Real I/O, executors, threads, signals and subprocesses reach outside the
+    simulation, so they fail loudly instead of silently breaking determinism.
+    """
+
+
+def _fence(api: str) -> NoReturn:
+    raise SimulationFenceError(
+        f"simloop does not simulate {api!r}; "
+        "see docs/supported-api.md for the supported asyncio subset"
+    )
 
 
 def _label(callback: Callable[..., object]) -> str:
@@ -303,7 +318,7 @@ class SimLoop(asyncio.AbstractEventLoop):
         *args: Unpack[_Ts],
         context: Context | None = None,
     ) -> asyncio.Handle:
-        raise NotImplementedError("call_soon_threadsafe is not supported")
+        _fence("call_soon_threadsafe")
 
     def run_in_executor(
         self,
@@ -311,7 +326,7 @@ class SimLoop(asyncio.AbstractEventLoop):
         func: Callable[[Unpack[_Ts]], Any],
         *args: Unpack[_Ts],
     ) -> Any:
-        raise NotImplementedError("run_in_executor is not supported")
+        _fence("run_in_executor")
 
     def add_reader(
         self,
@@ -319,7 +334,7 @@ class SimLoop(asyncio.AbstractEventLoop):
         callback: Callable[[Unpack[_Ts]], Any],
         *args: Unpack[_Ts],
     ) -> None:
-        raise NotImplementedError("add_reader is not supported")
+        _fence("add_reader")
 
     def add_writer(
         self,
@@ -327,7 +342,7 @@ class SimLoop(asyncio.AbstractEventLoop):
         callback: Callable[[Unpack[_Ts]], Any],
         *args: Unpack[_Ts],
     ) -> None:
-        raise NotImplementedError("add_writer is not supported")
+        _fence("add_writer")
 
     def add_signal_handler(
         self,
@@ -335,94 +350,94 @@ class SimLoop(asyncio.AbstractEventLoop):
         callback: Callable[[Unpack[_Ts]], object],
         *args: Unpack[_Ts],
     ) -> None:
-        raise NotImplementedError("add_signal_handler is not supported")
+        _fence("add_signal_handler")
 
     def set_default_executor(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("set_default_executor is not supported")
+        _fence("set_default_executor")
 
     def set_task_factory(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("set_task_factory is not supported")
+        _fence("set_task_factory")
 
     def get_task_factory(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("get_task_factory is not supported")
+        _fence("get_task_factory")
 
     def set_exception_handler(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("set_exception_handler is not supported")
+        _fence("set_exception_handler")
 
     def get_exception_handler(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("get_exception_handler is not supported")
+        _fence("get_exception_handler")
 
     def shutdown_asyncgens(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("shutdown_asyncgens is not supported")
+        _fence("shutdown_asyncgens")
 
     def shutdown_default_executor(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("shutdown_default_executor is not supported")
+        _fence("shutdown_default_executor")
 
     def getaddrinfo(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("getaddrinfo is not supported")
+        _fence("getaddrinfo")
 
     def getnameinfo(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("getnameinfo is not supported")
+        _fence("getnameinfo")
 
     def create_connection(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("create_connection is not supported")
+        _fence("create_connection")
 
     def create_server(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("create_server is not supported")
+        _fence("create_server")
 
     def start_tls(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("start_tls is not supported")
+        _fence("start_tls")
 
     def sendfile(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("sendfile is not supported")
+        _fence("sendfile")
 
     def sock_sendfile(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("sock_sendfile is not supported")
+        _fence("sock_sendfile")
 
     def create_datagram_endpoint(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("create_datagram_endpoint is not supported")
+        _fence("create_datagram_endpoint")
 
     def connect_read_pipe(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("connect_read_pipe is not supported")
+        _fence("connect_read_pipe")
 
     def connect_write_pipe(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("connect_write_pipe is not supported")
+        _fence("connect_write_pipe")
 
     def subprocess_shell(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("subprocess_shell is not supported")
+        _fence("subprocess_shell")
 
     def subprocess_exec(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("subprocess_exec is not supported")
+        _fence("subprocess_exec")
 
     def remove_reader(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("remove_reader is not supported")
+        _fence("remove_reader")
 
     def remove_writer(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("remove_writer is not supported")
+        _fence("remove_writer")
 
     def remove_signal_handler(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("remove_signal_handler is not supported")
+        _fence("remove_signal_handler")
 
     def sock_recv(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("sock_recv is not supported")
+        _fence("sock_recv")
 
     def sock_recv_into(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("sock_recv_into is not supported")
+        _fence("sock_recv_into")
 
     def sock_sendall(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("sock_sendall is not supported")
+        _fence("sock_sendall")
 
     def sock_connect(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("sock_connect is not supported")
+        _fence("sock_connect")
 
     def sock_accept(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("sock_accept is not supported")
+        _fence("sock_accept")
 
     def sock_sendto(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("sock_sendto is not supported")
+        _fence("sock_sendto")
 
     def sock_recvfrom(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("sock_recvfrom is not supported")
+        _fence("sock_recvfrom")
 
     def sock_recvfrom_into(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("sock_recvfrom_into is not supported")
+        _fence("sock_recvfrom_into")

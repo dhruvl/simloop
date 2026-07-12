@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from simloop import SimLoop, SimulationDeadlockError
+from simloop import SimLoop, SimulationDeadlockError, SimulationFenceError
 
 
 def test_runs_a_coroutine_to_completion() -> None:
@@ -166,8 +166,13 @@ def test_main_task_exception_wins_over_background_failure() -> None:
 def test_unsupported_apis_are_fenced() -> None:
     loop = SimLoop(seed=0)
     try:
-        with pytest.raises(NotImplementedError):
+        with pytest.raises(SimulationFenceError, match="run_in_executor"):
             loop.run_in_executor(None, print)
+        with pytest.raises(SimulationFenceError, match="supported-api"):
+            loop.call_soon_threadsafe(print)
+        # Callers written against the stdlib contract keep working.
+        with pytest.raises(NotImplementedError):
+            loop.add_signal_handler(2, print)
     finally:
         loop.close()
 
