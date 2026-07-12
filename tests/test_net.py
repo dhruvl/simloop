@@ -308,3 +308,143 @@ def test_driver_is_unaffected_by_partitions_it_is_not_named_in() -> None:
     finally:
         loop.close()
     assert received == [(b"hello", ("driver", 7002))]
+
+
+def test_crash_cancels_pinned_tasks_and_silences_traffic() -> None:
+    loop = SimLoop(seed=0)
+    alpha = loop.net.host("alpha")
+    beta = loop.net.host("beta")
+    cancelled: list[str] = []
+
+    async def chatter(transport: asyncio.DatagramTransport) -> None:
+        try:
+            while True:
+                transport.sendto(b"tick", ("alpha", 7000))
+                await asyncio.sleep(0.1)
+        except asyncio.CancelledError:
+            cancelled.append("chatter")
+            raise
+
+    async def main() -> int:
+        transport_a, collector = await _bound_endpoint(alpha, 7000)
+        transport_b, _ = await _bound_endpoint(beta, 7001)
+        beta.create_task(chatter(transport_b))
+        loop.call_later(0.35, beta.crash)
+        await asyncio.sleep(2.0)
+        transport_a.close()
+        await asyncio.sleep(0.01)
+        return len(collector.received)
+
+    try:
+        count = loop.run_until_complete(main())
+    finally:
+        loop.close()
+    assert cancelled == ["chatter"]
+    assert count == 4  # ticks at t=0, 0.1, 0.2, 0.3 — nothing after the crash
+    assert loop.net._tasks["beta"] == []
+
+
+def test_crash_discards_held_packets() -> None:
+    loop = SimLoop(seed=0)
+    alpha = loop.net.host("alpha")
+    beta = loop.net.host("beta")
+
+    async def swallow(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            async with asyncio.timeout(5.0):
+                await reader.read()
+        except TimeoutError:
+            pass
+        finally:
+            writer.close()
+
+    async def serve() -> None:
+        server = await asyncio.start_server(swallow, "0.0.0.0", 9000)
+        async with server:
+            await asyncio.sleep(10.0)
+
+    async def open_stream() -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        return await asyncio.open_connection("beta", 9000)
+
+    async def main() -> None:
+        beta.create_task(serve())  # dies with the crash; no reaping needed
+        await asyncio.sleep(0.01)
+        _, writer = await alpha.create_task(open_stream())
+        loop.net.partition({"alpha"}, {"beta"})
+        writer.write(b"held\n")
+        await asyncio.sleep(0.1)
+        loop.net.crash("beta")  # the held write is discarded here
+        loop.net.heal()
+        await asyncio.sleep(0.5)
+        writer.close()
+        await asyncio.sleep(0.01)
+
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()
+    labels = [e.label for e in loop.trace if e.kind == "net"]
+    assert "hold alpha>beta" in labels
+    assert "lost alpha>beta" in labels
+    assert "release alpha>beta" not in labels
+
+
+def test_crash_guards() -> None:
+    loop = SimLoop(seed=0)
+    try:
+        net = loop.net
+        net.host("alpha")
+        with pytest.raises(OSError, match="unknown host"):
+            net.crash("ghost")
+        with pytest.raises(ValueError, match="driver"):
+            net.crash("driver")
+        net.crash("alpha")
+        with pytest.raises(ValueError, match="already crashed"):
+            net.crash("alpha")
+    finally:
+        loop.close()
+
+
+def test_server_tasks_are_pinned_to_the_server_not_the_dialing_client() -> None:
+    # Delivery pins the receiving context: a handler task spawned when the
+    # server accepts a connection must die with the server, and must survive
+    # the client.
+    loop = SimLoop(seed=0)
+    server_host = loop.net.host("api")
+    client_host = loop.net.host("cli")
+    outcome: list[str] = []
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            async with asyncio.timeout(5.0):
+                await reader.read()
+            outcome.append("finished")
+        except asyncio.CancelledError:
+            outcome.append("cancelled")
+            raise
+        finally:
+            writer.close()
+
+    async def main() -> None:
+        async def serve() -> None:
+            server = await asyncio.start_server(handler, "0.0.0.0", 9000)
+            async with server:
+                await asyncio.sleep(10.0)
+
+        async def connect() -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+            return await asyncio.open_connection("api", 9000)
+
+        server_host.create_task(serve())
+        await asyncio.sleep(0.01)
+        _, writer = await client_host.create_task(connect())
+        loop.net.crash("cli")   # handler survives: it belongs to "api"
+        await asyncio.sleep(0.1)
+        loop.net.crash("api")   # now the handler dies
+        await asyncio.sleep(0.1)
+        writer.close()
+
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()
+    assert outcome == ["cancelled"]

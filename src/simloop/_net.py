@@ -549,7 +549,31 @@ class SimNetwork:
         self._datagrams.pop(addr, None)
 
     def crash(self, name: str) -> None:
-        raise NotImplementedError
+        """Kill a host mid-run: its tasks are cancelled and it goes silent.
+
+        A crashed machine sends no reset — peers see nothing at all, which is
+        what makes crashes indistinguishable from partitions to the code
+        under test until a timeout says otherwise.
+        """
+        self._require_host(name)
+        if name == DRIVER:
+            raise ValueError("the driver host cannot crash")
+        if not self._alive[name]:
+            raise ValueError(f"host {name!r} already crashed")
+        self._alive[name] = False
+        for task in list(self._tasks[name]):
+            task.cancel()
+        for key in [key for key in self._listeners if key[0] == name]:
+            self._listeners[key].server.close()
+        for key in [key for key in self._datagrams if key[0] == name]:
+            del self._datagrams[key]
+        kept: list[_Packet] = []
+        for packet in self._held:
+            if name in (packet.src, packet.dst):
+                self._trace("lost", packet)
+            else:
+                kept.append(packet)
+        self._held = kept
 
     def _register_task(self, task: asyncio.Task[Any]) -> None:
         owner = self._tasks[_current_host.get()]
