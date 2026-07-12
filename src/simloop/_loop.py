@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, NoReturn, TypeVarTuple, Unpack
 if TYPE_CHECKING:
     from asyncio.events import _TaskFactory
 
+from simloop._net import SimNetwork
 from simloop._trace import TraceEvent, TraceRecorder
 
 _Ts = TypeVarTuple("_Ts")
@@ -97,6 +98,7 @@ class SimLoop(asyncio.AbstractEventLoop):
         self._unhandled: list[BaseException] = []
         self._exception_handler: _ExceptionHandler | None = None
         self._task_factory: _TaskFactory | None = None
+        self._net = SimNetwork(self)
 
     # ------------------------------------------------------------------
     # Introspection
@@ -112,6 +114,10 @@ class SimLoop(asyncio.AbstractEventLoop):
 
     def trace_hash(self) -> str:
         return self._recorder.hash()
+
+    @property
+    def net(self) -> SimNetwork:
+        return self._net
 
     # ------------------------------------------------------------------
     # Clock and scheduling
@@ -285,17 +291,21 @@ class SimLoop(asyncio.AbstractEventLoop):
     ) -> asyncio.Task[Any]:
         self._check_closed()
         if self._task_factory is None:
-            return asyncio.Task(coro, loop=self, name=name, context=context)
-        factory: Any = self._task_factory
-        task: asyncio.Task[Any] = (
-            factory(self, coro)
-            if context is None
-            else factory(self, coro, context=context)
-        )
-        if name is not None:
-            set_name = getattr(task, "set_name", None)
-            if set_name is not None:
-                set_name(name)
+            task: asyncio.Task[Any] = asyncio.Task(
+                coro, loop=self, name=name, context=context
+            )
+        else:
+            factory: Any = self._task_factory
+            task = (
+                factory(self, coro)
+                if context is None
+                else factory(self, coro, context=context)
+            )
+            if name is not None:
+                set_name = getattr(task, "set_name", None)
+                if set_name is not None:
+                    set_name(name)
+        self._net._register_task(task)
         return task
 
     def set_task_factory(self, factory: _TaskFactory | None) -> None:
