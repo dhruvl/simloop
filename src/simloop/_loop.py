@@ -10,11 +10,16 @@ import sys
 from asyncio import events
 from collections.abc import Callable
 from contextvars import Context
-from typing import Any, TypeVarTuple, Unpack
+from typing import TYPE_CHECKING, Any, NoReturn, TypeVarTuple, Unpack
+
+if TYPE_CHECKING:
+    from asyncio.events import _TaskFactory
 
 from simloop._trace import TraceEvent, TraceRecorder
 
 _Ts = TypeVarTuple("_Ts")
+
+_ExceptionHandler = Callable[[asyncio.AbstractEventLoop, dict[str, Any]], object]
 
 
 class SimulationDeadlockError(RuntimeError):
@@ -23,6 +28,21 @@ class SimulationDeadlockError(RuntimeError):
     This usually means a lost wakeup: some task is waiting on a future or queue
     that nothing will ever complete.
     """
+
+
+class SimulationFenceError(NotImplementedError):
+    """The code under simulation touched an asyncio API simloop does not simulate.
+
+    Real I/O, executors, threads, signals and subprocesses reach outside the
+    simulation, so they fail loudly instead of silently breaking determinism.
+    """
+
+
+def _fence(api: str) -> NoReturn:
+    raise SimulationFenceError(
+        f"simloop does not simulate {api!r}; "
+        "see docs/supported-api.md for the supported asyncio subset"
+    )
 
 
 def _label(callback: Callable[..., object]) -> str:
@@ -53,6 +73,13 @@ class SimLoop(asyncio.AbstractEventLoop):
     def __init__(self, seed: int = 0) -> None:
         self._seed = seed
         self._rng = random.Random(seed)
+        # Streams for user-facing entropy, derived from the seed but kept
+        # separate from the scheduler's RNG: user draws must never perturb
+        # scheduling order, and scheduling must never perturb user values.
+        # String seeding hashes via SHA-512, so the streams are stable
+        # across processes and interpreter versions.
+        self._user_random = random.Random(f"{seed}:random")
+        self._uuid_random = random.Random(f"{seed}:uuid")
         self._now = 0.0
         # Ready entries are (seq, label, handle); seq is a global creation
         # counter that gives every scheduled callback a stable identity.
@@ -68,6 +95,8 @@ class SimLoop(asyncio.AbstractEventLoop):
         # Exceptions from callbacks and fire-and-forget tasks accumulate here
         # and are re-raised from run_until_complete once the loop stops.
         self._unhandled: list[BaseException] = []
+        self._exception_handler: _ExceptionHandler | None = None
+        self._task_factory: _TaskFactory | None = None
 
     # ------------------------------------------------------------------
     # Introspection
@@ -139,13 +168,17 @@ class SimLoop(asyncio.AbstractEventLoop):
         index = self._rng.randrange(len(self._ready))
         seq, label, handle = self._ready.pop(index)
         if handle.cancelled():
+            # The draw itself is a scheduling decision, so a skipped handle
+            # must appear in the trace for the replay proof to stay complete.
+            self._recorder.record("cancel", self._now, seq, label)
             return
         self._recorder.record("run", self._now, seq, label)
         handle._run()
 
     def _advance_clock(self) -> None:
         while self._timers and self._timers[0][3].cancelled():
-            heapq.heappop(self._timers)
+            _, seq, label, _timer = heapq.heappop(self._timers)
+            self._recorder.record("cancel", self._now, seq, label)
         if not self._timers:
             raise SimulationDeadlockError(
                 "nothing left to run: no ready callbacks and no pending timers"
@@ -154,7 +187,9 @@ class SimLoop(asyncio.AbstractEventLoop):
         self._recorder.record("advance", self._now, -1, "")
         while self._timers and self._timers[0][0] <= self._now:
             _, seq, label, timer = heapq.heappop(self._timers)
-            if not timer.cancelled():
+            if timer.cancelled():
+                self._recorder.record("cancel", self._now, seq, label)
+            else:
                 self._ready.append((seq, label, timer))
 
     # ------------------------------------------------------------------
@@ -249,13 +284,58 @@ class SimLoop(asyncio.AbstractEventLoop):
         context: Context | None = None,
     ) -> asyncio.Task[Any]:
         self._check_closed()
-        return asyncio.Task(coro, loop=self, name=name, context=context)
+        if self._task_factory is None:
+            return asyncio.Task(coro, loop=self, name=name, context=context)
+        factory: Any = self._task_factory
+        task: asyncio.Task[Any] = (
+            factory(self, coro)
+            if context is None
+            else factory(self, coro, context=context)
+        )
+        if name is not None:
+            set_name = getattr(task, "set_name", None)
+            if set_name is not None:
+                set_name(name)
+        return task
+
+    def set_task_factory(self, factory: _TaskFactory | None) -> None:
+        if factory is not None and not callable(factory):
+            raise TypeError("task factory must be a callable or None")
+        self._task_factory = factory
+
+    def get_task_factory(self) -> _TaskFactory | None:
+        return self._task_factory
 
     # ------------------------------------------------------------------
     # Error handling
     # ------------------------------------------------------------------
 
+    def set_exception_handler(self, handler: _ExceptionHandler | None) -> None:
+        if handler is not None and not callable(handler):
+            raise TypeError(
+                f"a callable object or None is expected, got {handler!r}"
+            )
+        self._exception_handler = handler
+
+    def get_exception_handler(self) -> _ExceptionHandler | None:
+        return self._exception_handler
+
     def call_exception_handler(self, context: dict[str, Any]) -> None:
+        if self._exception_handler is None:
+            self.default_exception_handler(context)
+            return
+        try:
+            self._exception_handler(self, context)
+        except (SystemExit, KeyboardInterrupt):
+            raise
+        except BaseException as handler_error:
+            # A broken exception handler is itself a failure that must not
+            # vanish: surface it, and fall back to the default policy for
+            # the original context.
+            self._unhandled.append(handler_error)
+            self.default_exception_handler(context)
+
+    def default_exception_handler(self, context: dict[str, Any]) -> None:
         # A simulation must not swallow errors. Collect real failures so that
         # run_until_complete re-raises them once the loop stops. This covers
         # fire-and-forget tasks, whose exceptions otherwise reach here only
@@ -270,9 +350,6 @@ class SimLoop(asyncio.AbstractEventLoop):
             print(
                 "simloop:", context.get("message", "unhandled error"), file=sys.stderr
             )
-
-    def default_exception_handler(self, context: dict[str, Any]) -> None:
-        self.call_exception_handler(context)
 
     def get_debug(self) -> bool:
         return False
@@ -303,7 +380,7 @@ class SimLoop(asyncio.AbstractEventLoop):
         *args: Unpack[_Ts],
         context: Context | None = None,
     ) -> asyncio.Handle:
-        raise NotImplementedError("call_soon_threadsafe is not supported")
+        _fence("call_soon_threadsafe")
 
     def run_in_executor(
         self,
@@ -311,7 +388,7 @@ class SimLoop(asyncio.AbstractEventLoop):
         func: Callable[[Unpack[_Ts]], Any],
         *args: Unpack[_Ts],
     ) -> Any:
-        raise NotImplementedError("run_in_executor is not supported")
+        _fence("run_in_executor")
 
     def add_reader(
         self,
@@ -319,7 +396,7 @@ class SimLoop(asyncio.AbstractEventLoop):
         callback: Callable[[Unpack[_Ts]], Any],
         *args: Unpack[_Ts],
     ) -> None:
-        raise NotImplementedError("add_reader is not supported")
+        _fence("add_reader")
 
     def add_writer(
         self,
@@ -327,7 +404,7 @@ class SimLoop(asyncio.AbstractEventLoop):
         callback: Callable[[Unpack[_Ts]], Any],
         *args: Unpack[_Ts],
     ) -> None:
-        raise NotImplementedError("add_writer is not supported")
+        _fence("add_writer")
 
     def add_signal_handler(
         self,
@@ -335,94 +412,82 @@ class SimLoop(asyncio.AbstractEventLoop):
         callback: Callable[[Unpack[_Ts]], object],
         *args: Unpack[_Ts],
     ) -> None:
-        raise NotImplementedError("add_signal_handler is not supported")
+        _fence("add_signal_handler")
 
     def set_default_executor(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("set_default_executor is not supported")
-
-    def set_task_factory(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("set_task_factory is not supported")
-
-    def get_task_factory(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("get_task_factory is not supported")
-
-    def set_exception_handler(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("set_exception_handler is not supported")
-
-    def get_exception_handler(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("get_exception_handler is not supported")
+        _fence("set_default_executor")
 
     def shutdown_asyncgens(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("shutdown_asyncgens is not supported")
+        _fence("shutdown_asyncgens")
 
     def shutdown_default_executor(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("shutdown_default_executor is not supported")
+        _fence("shutdown_default_executor")
 
     def getaddrinfo(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("getaddrinfo is not supported")
+        _fence("getaddrinfo")
 
     def getnameinfo(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("getnameinfo is not supported")
+        _fence("getnameinfo")
 
     def create_connection(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("create_connection is not supported")
+        _fence("create_connection")
 
     def create_server(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("create_server is not supported")
+        _fence("create_server")
 
     def start_tls(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("start_tls is not supported")
+        _fence("start_tls")
 
     def sendfile(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("sendfile is not supported")
+        _fence("sendfile")
 
     def sock_sendfile(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("sock_sendfile is not supported")
+        _fence("sock_sendfile")
 
     def create_datagram_endpoint(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("create_datagram_endpoint is not supported")
+        _fence("create_datagram_endpoint")
 
     def connect_read_pipe(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("connect_read_pipe is not supported")
+        _fence("connect_read_pipe")
 
     def connect_write_pipe(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("connect_write_pipe is not supported")
+        _fence("connect_write_pipe")
 
     def subprocess_shell(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("subprocess_shell is not supported")
+        _fence("subprocess_shell")
 
     def subprocess_exec(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("subprocess_exec is not supported")
+        _fence("subprocess_exec")
 
     def remove_reader(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("remove_reader is not supported")
+        _fence("remove_reader")
 
     def remove_writer(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("remove_writer is not supported")
+        _fence("remove_writer")
 
     def remove_signal_handler(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("remove_signal_handler is not supported")
+        _fence("remove_signal_handler")
 
     def sock_recv(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("sock_recv is not supported")
+        _fence("sock_recv")
 
     def sock_recv_into(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("sock_recv_into is not supported")
+        _fence("sock_recv_into")
 
     def sock_sendall(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("sock_sendall is not supported")
+        _fence("sock_sendall")
 
     def sock_connect(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("sock_connect is not supported")
+        _fence("sock_connect")
 
     def sock_accept(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("sock_accept is not supported")
+        _fence("sock_accept")
 
     def sock_sendto(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("sock_sendto is not supported")
+        _fence("sock_sendto")
 
     def sock_recvfrom(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("sock_recvfrom is not supported")
+        _fence("sock_recvfrom")
 
     def sock_recvfrom_into(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("sock_recvfrom_into is not supported")
+        _fence("sock_recvfrom_into")

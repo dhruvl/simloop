@@ -13,10 +13,12 @@ a test that deadlocks *every* time at seed 4217, in milliseconds, under a debugg
 
 ## Status
 
-**Early development — nothing usable yet.** First goal: a from-scratch
-deterministic event loop that runs a toy client/server pair with identical
-trace hashes across repeated runs at the same seed, and different orderings
-across seeds.
+**Early development.** The deterministic loop core works: seeded scheduling,
+virtual time, replay-proving trace hashes, deadlock detection, and seeded
+`sim.random` / `sim.uuid4` / `sim.time` shims, with the stdlib coordination
+primitives (`Queue`, `Event`, `Lock`, `gather`, `TaskGroup`, `timeout`)
+running unchanged on top. No simulated network yet. See
+[the supported subset](docs/supported-api.md) for the exact contract.
 
 ## Planned
 

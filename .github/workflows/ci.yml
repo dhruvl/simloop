@@ -19,5 +19,6 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: uv sync
-      - run: uv run pytest -q
+      - run: uv run pytest -q -m "slow or not slow"
       - run: uv run mypy
+      - run: uv run python benchmarks/overhead.py --tasks 10 --rounds 10
