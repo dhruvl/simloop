@@ -23,10 +23,8 @@ def test_host_registration_and_validation() -> None:
         node = loop.net.host("node1")
         assert isinstance(node, Host)
         assert node.name == "node1"
-        with pytest.raises(ValueError, match="already"):
-            loop.net.host("node1")
-        with pytest.raises(ValueError, match="already"):
-            loop.net.host("driver")  # implicit driver host is pre-registered
+        assert loop.net.host("node1") is node  # repeat lookup returns the same host
+        assert loop.net.host("driver").name == "driver"  # implicit driver host
         for bad in ("", "a|b", "a>b", "a\nb"):
             with pytest.raises(ValueError):
                 loop.net.host(bad)

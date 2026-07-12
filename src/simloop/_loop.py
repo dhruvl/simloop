@@ -328,6 +328,27 @@ class SimLoop(asyncio.AbstractEventLoop):
             protocol_factory, local_addr, remote_addr
         )
 
+    async def create_connection(
+        self,
+        protocol_factory: Any,
+        host: Any = None,
+        port: Any = None,
+        **kwargs: Any,
+    ) -> Any:
+        _reject_kwargs("create_connection", kwargs)
+        return await self._net._open_connection(protocol_factory, host, port)
+
+    async def create_server(
+        self,
+        protocol_factory: Any,
+        host: Any = None,
+        port: Any = None,
+        **kwargs: Any,
+    ) -> Any:
+        kwargs.pop("backlog", None)  # accepted and irrelevant: no accept queue
+        _reject_kwargs("create_server", kwargs)
+        return await self._net._start_server(protocol_factory, host, port)
+
     def set_task_factory(self, factory: _TaskFactory | None) -> None:
         if factory is not None and not callable(factory):
             raise TypeError("task factory must be a callable or None")
@@ -458,12 +479,6 @@ class SimLoop(asyncio.AbstractEventLoop):
 
     def getnameinfo(self, *args: Any, **kwargs: Any) -> Any:
         _fence("getnameinfo")
-
-    def create_connection(self, *args: Any, **kwargs: Any) -> Any:
-        _fence("create_connection")
-
-    def create_server(self, *args: Any, **kwargs: Any) -> Any:
-        _fence("create_server")
 
     def start_tls(self, *args: Any, **kwargs: Any) -> Any:
         _fence("start_tls")

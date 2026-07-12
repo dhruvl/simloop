@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 import asyncio
 
-from simloop._transports import _SimDatagramTransport
+from simloop._transports import _SimDatagramTransport, _SimStreamTransport
 
 if TYPE_CHECKING:
     from simloop._loop import SimLoop
@@ -49,6 +49,69 @@ class _Link:
     latency: tuple[float, float] | None = None
     drop: float | None = None
     duplicate: float | None = None
+
+
+@dataclass(slots=True)
+class _Listener:
+    factory: Any
+    server: SimServer
+
+
+@dataclass(slots=True)
+class _Connect:
+    # An in-flight outbound connection. The client transport is built when the
+    # accept lands (not when the connector resumes), so a peer that speaks
+    # first cannot outrun the transport's registration.
+    fut: asyncio.Future[tuple[_SimStreamTransport, Any]]
+    factory: Any
+    local: tuple[str, int]
+    remote: tuple[str, int]
+
+
+class _InOrder:
+    """Reassembles one direction of a stream connection into seq order."""
+
+    def __init__(self, net: SimNetwork) -> None:
+        self._net = net
+        self._next = 0
+        self._early: dict[int, _Packet] = {}
+
+    def push(self, packet: _Packet) -> None:
+        self._early[packet.seq] = packet
+        while self._next in self._early:
+            ready = self._early.pop(self._next)
+            self._next += 1
+            self._net._dispatch_ready(ready)
+
+
+class SimServer(asyncio.AbstractServer):
+    """A listening endpoint; serving from creation, like the stdlib default."""
+
+    def __init__(self, net: SimNetwork, host: str, port: int) -> None:
+        self._net = net
+        self._host = host
+        self._port = port
+        self._closed_fut: asyncio.Future[None] = net._loop.create_future()
+
+    def close(self) -> None:
+        if not self._closed_fut.done():
+            self._net._listeners.pop((self._host, self._port), None)
+            self._closed_fut.set_result(None)
+
+    def is_serving(self) -> bool:
+        return not self._closed_fut.done()
+
+    async def wait_closed(self) -> None:
+        await asyncio.shield(self._closed_fut)
+
+    async def start_serving(self) -> None:
+        return None
+
+    async def serve_forever(self) -> None:
+        await asyncio.shield(self._closed_fut)
+
+    def get_loop(self) -> Any:
+        return self._net._loop
 
 
 def _check_probability(name: str, value: float) -> float:
@@ -102,17 +165,23 @@ class SimNetwork:
         self._default_duplicate = 0.0
         self._links: dict[tuple[str, str], _Link] = {}
         self._datagrams: dict[tuple[str, int], _SimDatagramTransport] = {}
+        self._listeners: dict[tuple[str, int], _Listener] = {}
+        self._streams: dict[tuple[int, str], _SimStreamTransport] = {}
+        self._inbound: dict[tuple[int, str], _InOrder] = {}
+        self._pending: dict[int, _Connect] = {}
+        self._next_conn = 0
         self._next_uid = 0
         self._next_port = 49152
         self.host(DRIVER)
 
     def host(self, name: str) -> Host:
+        existing = self._hosts.get(name)
+        if existing is not None:
+            return existing
         if not name:
             raise ValueError("host name must be a non-empty string")
         if any(ch in name for ch in _FORBIDDEN_NAME_CHARS):
             raise ValueError(f"host name {name!r} may not contain '|', '>' or newline")
-        if name in self._hosts:
-            raise ValueError(f"host {name!r} already exists")
         host = Host(self, name)
         self._hosts[name] = host
         self._alive[name] = True
@@ -220,7 +289,162 @@ class SimNetwork:
             _current_host.reset(token)
 
     def _dispatch_stream(self, packet: _Packet) -> None:
-        raise NotImplementedError
+        key = (packet.conn, packet.dst)
+        queue = self._inbound.get(key)
+        if queue is None:
+            queue = self._inbound[key] = _InOrder(self)
+        queue.push(packet)
+
+    def _dispatch_ready(self, packet: _Packet) -> None:
+        if packet.kind == "syn":
+            self._handle_syn(packet)
+            return
+        if packet.kind in ("accept", "refuse"):
+            connect = self._pending.pop(packet.conn, None)
+            if connect is None or connect.fut.done():
+                # The connector gave up (cancelled) before the answer landed.
+                return
+            if packet.kind == "accept":
+                # Stand the client transport up now, in the same in-order step
+                # that processes the accept (seq 0). Data the peer sent from
+                # connection_made is seq 1+, so it is dispatched strictly after
+                # this and always finds a registered transport.
+                client = _SimStreamTransport(
+                    self, packet.conn, local=connect.local, remote=connect.remote
+                )
+                self._streams[(packet.conn, connect.local[0])] = client
+                protocol = connect.factory()
+                client._begin(protocol)
+                connect.fut.set_result((client, protocol))
+            else:
+                connect.fut.set_exception(
+                    ConnectionRefusedError(
+                        f"connect to ({packet.src!r}, {packet.dst_port}) refused"
+                    )
+                )
+            return
+        transport = self._streams.get((packet.conn, packet.dst))
+        if transport is None:
+            return  # connection already torn down locally
+        if packet.kind == "data":
+            transport._data_arrived(packet.payload)
+        elif packet.kind == "fin":
+            transport._eof_arrived()
+        elif packet.kind == "rst":
+            transport._reset_arrived()
+
+    def _handle_syn(self, packet: _Packet) -> None:
+        listener = self._listeners.get((packet.dst, packet.dst_port))
+        if listener is None:
+            self._send_stream(
+                kind="refuse",
+                src=packet.dst,
+                dst=packet.src,
+                conn=packet.conn,
+                seq=0,
+                dst_port=packet.dst_port,
+            )
+            return
+        transport = _SimStreamTransport(
+            self,
+            packet.conn,
+            local=(packet.dst, packet.dst_port),
+            remote=(packet.src, packet.src_port),
+        )
+        self._streams[(packet.conn, packet.dst)] = transport
+        # The accept is seq 0 of the server-to-client direction, so any data
+        # the protocol writes from connection_made (seq 1+) can never arrive
+        # ahead of the accept, whatever the latency draws say.
+        self._send_stream(
+            kind="accept", src=packet.dst, dst=packet.src, conn=packet.conn, seq=0
+        )
+        protocol = listener.factory()
+        transport._begin(protocol)
+
+    def _send_stream(
+        self,
+        *,
+        kind: str,
+        src: str,
+        dst: str,
+        conn: int,
+        seq: int,
+        payload: bytes = b"",
+        src_port: int = 0,
+        dst_port: int = 0,
+    ) -> None:
+        self._transmit(
+            _Packet(
+                kind=kind,
+                src=src,
+                dst=dst,
+                src_port=src_port,
+                dst_port=dst_port,
+                conn=conn,
+                seq=seq,
+                payload=payload,
+                uid=self._new_uid(),
+            )
+        )
+
+    def _drop_stream(self, conn: int, host: str) -> None:
+        self._streams.pop((conn, host), None)
+
+    async def _open_connection(
+        self, protocol_factory: Any, host: Any, port: Any
+    ) -> tuple[_SimStreamTransport, Any]:
+        if not isinstance(host, str) or not isinstance(port, int):
+            raise ValueError("host and port are required")
+        self._require_host(host)
+        src = _current_host.get()
+        conn = self._next_conn
+        self._next_conn += 1
+        src_port = self._ephemeral()
+        fut: asyncio.Future[tuple[_SimStreamTransport, Any]] = (
+            self._loop.create_future()
+        )
+        self._pending[conn] = _Connect(
+            fut=fut,
+            factory=protocol_factory,
+            local=(src, src_port),
+            remote=(host, port),
+        )
+        self._send_stream(
+            kind="syn",
+            src=src,
+            dst=host,
+            conn=conn,
+            seq=0,
+            src_port=src_port,
+            dst_port=port,
+        )
+        try:
+            # The accept handler builds the transport, calls connection_made,
+            # and resolves this future with the ready-made pair.
+            return await fut
+        except asyncio.CancelledError:
+            # If the accept resolved this future in the same step the connector
+            # was cancelled, the transport is already built and connection_made
+            # has already run; abort it so a cancelled connect leaves nothing
+            # connected behind it.
+            if fut.done() and not fut.cancelled() and fut.exception() is None:
+                established, _ = fut.result()
+                established.abort()
+            raise
+        finally:
+            self._pending.pop(conn, None)
+
+    async def _start_server(
+        self, protocol_factory: Any, host: Any, port: Any
+    ) -> SimServer:
+        if not isinstance(port, int):
+            raise ValueError("port is required")
+        bind = self._bind_address(host, port)
+        if bind in self._listeners:
+            raise OSError(f"address {bind[0]!r}:{bind[1]} already in use")
+        server = SimServer(self, bind[0], bind[1])
+        self._listeners[bind] = _Listener(factory=protocol_factory, server=server)
+        return server
 
     # ------------------------------------------------------------------
     # Datagram endpoints
