@@ -567,6 +567,14 @@ class SimNetwork:
             self._listeners[key].server.close()
         for key in [key for key in self._datagrams if key[0] == name]:
             del self._datagrams[key]
+        # Tear down this host's own stream transports in-band: _finish sends no
+        # packet (a crashed host stays silent), pops the transport from
+        # _streams, and delivers connection_lost(None), so cleanup never falls
+        # to garbage collection. The materialized key list keeps _drop_stream's
+        # mutation from disturbing the iteration. The peer's transport for the
+        # same connection is left alone: it is still alive and times out itself.
+        for stream_key in [sk for sk in self._streams if sk[1] == name]:
+            self._streams[stream_key]._finish(None)
         kept: list[_Packet] = []
         for packet in self._held:
             if name in (packet.src, packet.dst):

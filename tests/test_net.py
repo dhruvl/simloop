@@ -389,6 +389,55 @@ def test_crash_discards_held_packets() -> None:
     assert "release alpha>beta" not in labels
 
 
+def test_crash_tears_down_the_hosts_open_connections() -> None:
+    # A crashed host's own stream transports must be dropped the moment it
+    # crashes, not left for the garbage collector to reap later: a transport
+    # that lingers in _streams is only reachable through the cancelled task's
+    # orphaned writer, whose close() then fires at GC time, so anything that
+    # depended on it would vary with GC timing rather than the seed.
+    loop = SimLoop(seed=0)
+    hub = loop.net.host("hub")
+    node = loop.net.host("node")
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            async with asyncio.timeout(5.0):
+                await reader.read()
+        except (TimeoutError, asyncio.CancelledError):
+            pass
+        finally:
+            writer.close()
+
+    async def serve() -> None:
+        server = await asyncio.start_server(handler, "0.0.0.0", 9000)
+        async with server:
+            await asyncio.sleep(10.0)
+
+    async def dial() -> None:
+        _, writer = await asyncio.open_connection("hub", 9000)
+        try:
+            while True:
+                await asyncio.sleep(0.05)
+        finally:
+            writer.close()
+
+    async def main() -> None:
+        hub.create_task(serve())
+        await asyncio.sleep(0.01)
+        node.create_task(dial())
+        await asyncio.sleep(0.05)
+        assert any(key[1] == "node" for key in loop.net._streams)
+        loop.net.crash("node")
+        assert not any(key[1] == "node" for key in loop.net._streams)
+        loop.net.crash("hub")  # reap the server side so no task lingers
+        await asyncio.sleep(0.05)
+
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()
+
+
 def test_crash_guards() -> None:
     loop = SimLoop(seed=0)
     try:
