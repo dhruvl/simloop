@@ -102,6 +102,18 @@ class SimServer(asyncio.AbstractServer):
     def is_serving(self) -> bool:
         return not self._closed_fut.done()
 
+    def close_clients(self) -> None:
+        """Close every connection this server accepted."""
+        for transport in list(self._net._streams.values()):
+            if transport._local == (self._host, self._port):
+                transport.close()
+
+    def abort_clients(self) -> None:
+        """Reset every connection this server accepted."""
+        for transport in list(self._net._streams.values()):
+            if transport._local == (self._host, self._port):
+                transport.abort()
+
     async def wait_closed(self) -> None:
         await asyncio.shield(self._closed_fut)
 

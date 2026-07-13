@@ -198,6 +198,77 @@ def test_abort_resets_the_peer() -> None:
     assert isinstance(lost[0], ConnectionResetError)
 
 
+def test_server_close_clients_disconnects_the_peer() -> None:
+    loop = _network()
+    lost: list[BaseException | None] = []
+    holder: dict[str, Any] = {}
+
+    class Peer(asyncio.Protocol):
+        def connection_lost(self, exc: Exception | None) -> None:
+            lost.append(exc)
+
+    async def main() -> None:
+        running = asyncio.get_running_loop()
+
+        async def serve() -> None:
+            holder["server"] = await running.create_server(
+                asyncio.Protocol, "0.0.0.0", 9000
+            )
+            await asyncio.sleep(10.0)
+
+        async def connect() -> None:
+            await running.create_connection(Peer, "server", 9000)
+
+        serve_task = loop.net.host("server").create_task(serve())
+        await asyncio.sleep(0.01)
+        await loop.net.host("client").create_task(connect())
+        holder["server"].close_clients()
+        await asyncio.sleep(0.5)
+        await _reap(serve_task)
+
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()
+    assert lost == [None]
+
+
+def test_server_abort_clients_resets_the_peer() -> None:
+    loop = _network()
+    lost: list[BaseException | None] = []
+    holder: dict[str, Any] = {}
+
+    class Peer(asyncio.Protocol):
+        def connection_lost(self, exc: Exception | None) -> None:
+            lost.append(exc)
+
+    async def main() -> None:
+        running = asyncio.get_running_loop()
+
+        async def serve() -> None:
+            holder["server"] = await running.create_server(
+                asyncio.Protocol, "0.0.0.0", 9000
+            )
+            await asyncio.sleep(10.0)
+
+        async def connect() -> None:
+            await running.create_connection(Peer, "server", 9000)
+
+        serve_task = loop.net.host("server").create_task(serve())
+        await asyncio.sleep(0.01)
+        await loop.net.host("client").create_task(connect())
+        holder["server"].abort_clients()
+        await asyncio.sleep(0.5)
+        await _reap(serve_task)
+
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()
+    assert len(lost) == 1
+    assert isinstance(lost[0], ConnectionResetError)
+
+
 def test_duplicate_bind_and_foreign_bind_are_rejected() -> None:
     loop = _network()
 
