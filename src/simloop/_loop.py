@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, NoReturn, TypeVarTuple, Unpack
 if TYPE_CHECKING:
     from asyncio.events import _TaskFactory
 
+from simloop._net import SimNetwork
 from simloop._trace import TraceEvent, TraceRecorder
 
 _Ts = TypeVarTuple("_Ts")
@@ -43,6 +44,14 @@ def _fence(api: str) -> NoReturn:
         f"simloop does not simulate {api!r}; "
         "see docs/supported-api.md for the supported asyncio subset"
     )
+
+
+def _reject_kwargs(api: str, kwargs: dict[str, Any]) -> None:
+    # Optional stdlib arguments (ssl, sock, interface selectors, ...) reach
+    # outside the simulation; anything actually requested must fail loudly.
+    for name, value in kwargs.items():
+        if value:
+            _fence(f"{api}({name}=...)")
 
 
 def _label(callback: Callable[..., object]) -> str:
@@ -97,6 +106,7 @@ class SimLoop(asyncio.AbstractEventLoop):
         self._unhandled: list[BaseException] = []
         self._exception_handler: _ExceptionHandler | None = None
         self._task_factory: _TaskFactory | None = None
+        self._net = SimNetwork(self)
 
     # ------------------------------------------------------------------
     # Introspection
@@ -112,6 +122,10 @@ class SimLoop(asyncio.AbstractEventLoop):
 
     def trace_hash(self) -> str:
         return self._recorder.hash()
+
+    @property
+    def net(self) -> SimNetwork:
+        return self._net
 
     # ------------------------------------------------------------------
     # Clock and scheduling
@@ -285,18 +299,55 @@ class SimLoop(asyncio.AbstractEventLoop):
     ) -> asyncio.Task[Any]:
         self._check_closed()
         if self._task_factory is None:
-            return asyncio.Task(coro, loop=self, name=name, context=context)
-        factory: Any = self._task_factory
-        task: asyncio.Task[Any] = (
-            factory(self, coro)
-            if context is None
-            else factory(self, coro, context=context)
-        )
-        if name is not None:
-            set_name = getattr(task, "set_name", None)
-            if set_name is not None:
-                set_name(name)
+            task: asyncio.Task[Any] = asyncio.Task(
+                coro, loop=self, name=name, context=context
+            )
+        else:
+            factory: Any = self._task_factory
+            task = (
+                factory(self, coro)
+                if context is None
+                else factory(self, coro, context=context)
+            )
+            if name is not None:
+                set_name = getattr(task, "set_name", None)
+                if set_name is not None:
+                    set_name(name)
+        self._net._register_task(task)
         return task
+
+    async def create_datagram_endpoint(
+        self,
+        protocol_factory: Any,
+        local_addr: Any = None,
+        remote_addr: Any = None,
+        **kwargs: Any,
+    ) -> Any:
+        _reject_kwargs("create_datagram_endpoint", kwargs)
+        return await self._net._open_datagram_endpoint(
+            protocol_factory, local_addr, remote_addr
+        )
+
+    async def create_connection(
+        self,
+        protocol_factory: Any,
+        host: Any = None,
+        port: Any = None,
+        **kwargs: Any,
+    ) -> Any:
+        _reject_kwargs("create_connection", kwargs)
+        return await self._net._open_connection(protocol_factory, host, port)
+
+    async def create_server(
+        self,
+        protocol_factory: Any,
+        host: Any = None,
+        port: Any = None,
+        **kwargs: Any,
+    ) -> Any:
+        kwargs.pop("backlog", None)  # accepted and irrelevant: no accept queue
+        _reject_kwargs("create_server", kwargs)
+        return await self._net._start_server(protocol_factory, host, port)
 
     def set_task_factory(self, factory: _TaskFactory | None) -> None:
         if factory is not None and not callable(factory):
@@ -429,12 +480,6 @@ class SimLoop(asyncio.AbstractEventLoop):
     def getnameinfo(self, *args: Any, **kwargs: Any) -> Any:
         _fence("getnameinfo")
 
-    def create_connection(self, *args: Any, **kwargs: Any) -> Any:
-        _fence("create_connection")
-
-    def create_server(self, *args: Any, **kwargs: Any) -> Any:
-        _fence("create_server")
-
     def start_tls(self, *args: Any, **kwargs: Any) -> Any:
         _fence("start_tls")
 
@@ -443,9 +488,6 @@ class SimLoop(asyncio.AbstractEventLoop):
 
     def sock_sendfile(self, *args: Any, **kwargs: Any) -> Any:
         _fence("sock_sendfile")
-
-    def create_datagram_endpoint(self, *args: Any, **kwargs: Any) -> Any:
-        _fence("create_datagram_endpoint")
 
     def connect_read_pipe(self, *args: Any, **kwargs: Any) -> Any:
         _fence("connect_read_pipe")
