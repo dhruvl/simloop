@@ -79,3 +79,26 @@ def test_failed_run_leaves_no_stderr_noise(
     gc.collect()
     _, err = capfd.readouterr()
     assert err == ""
+
+
+def test_render_includes_seed_trace_and_pending() -> None:
+    report = explore(lambda: _leaves_a_pending_task(), range(1), trace_tail=5)
+    assert report is not None
+    text = report.render("tests/test_demo.py::test_x")
+    lines = text.splitlines()
+    assert lines[0] == "simloop: failed at seed 0 (0 seeds passed first)"
+    assert lines[1] == (
+        "replay: pytest 'tests/test_demo.py::test_x' --simloop-replay=0"
+    )
+    assert "last 5 trace events:" in text
+    assert "pending tasks by host:" in text
+    assert "node1" in text and "'stuck'" in text
+    assert "awaiting _waits_forever" in text
+
+
+def test_render_without_test_id_omits_replay_line() -> None:
+    report = explore(lambda: _fails_at(0), range(1))
+    assert report is not None
+    text = report.render()
+    assert "replay:" not in text
+    assert text.startswith("simloop: failed at seed 0")

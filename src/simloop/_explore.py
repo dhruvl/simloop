@@ -9,6 +9,7 @@ any test-framework dependency.
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Callable, Coroutine, Iterable
 from dataclasses import dataclass
 from typing import Any
@@ -37,6 +38,32 @@ class SeedReport:
     trace_events: tuple[TraceEvent, ...]
     trace_hash: str
     pending: tuple[PendingTask, ...]
+
+    def render(self, test_id: str | None = None) -> str:
+        lines = [
+            f"simloop: failed at seed {self.seed} "
+            f"({self.seeds_passed} seeds passed first)"
+        ]
+        if test_id is not None:
+            lines.append(
+                f"replay: pytest '{test_id}' --simloop-replay={self.seed}"
+            )
+        if self.trace_events:
+            lines.append("")
+            lines.append(f"last {len(self.trace_events)} trace events:")
+            for event in self.trace_events:
+                lines.append(
+                    f"  [t={event.when:.4f}] {event.kind:<8} "
+                    f"seq={event.seq}  {event.label}"
+                )
+        if self.pending:
+            lines.append("pending tasks by host:")
+            for task in self.pending:
+                lines.append(
+                    f"  {task.host}  Task {task.name!r}  "
+                    f"awaiting {task.awaiting}  at {task.where}"
+                )
+        return "\n".join(lines)
 
 
 def explore(
@@ -87,13 +114,20 @@ def _pending_tasks(loop: SimLoop) -> tuple[PendingTask, ...]:
             if stack:
                 frame = stack[-1]
                 awaiting = frame.f_code.co_name
-                where = f"{frame.f_code.co_filename}:{frame.f_lineno}"
+                where = f"{_short_path(frame.f_code.co_filename)}:{frame.f_lineno}"
             found.append(
                 PendingTask(
                     host=host, name=task.get_name(), awaiting=awaiting, where=where
                 )
             )
     return tuple(found)
+
+
+def _short_path(filename: str) -> str:
+    cwd = os.getcwd()
+    if filename.startswith(cwd + os.sep):
+        return filename[len(cwd) + 1 :]
+    return filename
 
 
 def _drain(loop: SimLoop) -> None:
