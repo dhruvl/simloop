@@ -73,3 +73,41 @@ def test_plain():
     # own header prints "plugins: simloop-<version>" for any installed
     # entry-point plugin, and that must not fail this test.
     result.stdout.no_fnmatch_line("*simloop:*")
+
+
+def test_summary_counts_tests_and_seeds(pytester: pytest.Pytester) -> None:
+    pytester.makepyfile(
+        test_demo="""
+import asyncio
+from simloop import sim_test
+
+
+@sim_test(seeds=7)
+async def test_a():
+    await asyncio.sleep(0.1)
+
+
+@sim_test(seeds=5)
+async def test_b():
+    await asyncio.sleep(0.1)
+"""
+    )
+    result = pytester.runpytest_subprocess()
+    result.assert_outcomes(passed=2)
+    result.stdout.fnmatch_lines(["*simloop: 2 sim tests, 12 seeds explored*"])
+
+
+def test_summary_singular_for_one_test(pytester: pytest.Pytester) -> None:
+    pytester.makepyfile(
+        test_demo="""
+import asyncio
+from simloop import sim_test
+
+
+@sim_test(seeds=3)
+async def test_a():
+    await asyncio.sleep(0.1)
+"""
+    )
+    result = pytester.runpytest_subprocess()
+    result.stdout.fnmatch_lines(["*simloop: 1 sim test, 3 seeds explored*"])

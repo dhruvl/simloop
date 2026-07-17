@@ -49,3 +49,14 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
 
 def pytest_runtest_teardown(item: pytest.Item) -> None:
     _explore.overrides.node_id = None
+
+
+def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:
+    tests = _explore.overrides.sim_tests
+    if not tests:
+        return
+    seeds = _explore.overrides.seeds_explored
+    noun = "sim test" if tests == 1 else "sim tests"
+    terminalreporter.write_line(
+        f"simloop: {tests} {noun}, {seeds:,} seeds explored"
+    )
