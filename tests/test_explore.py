@@ -5,6 +5,7 @@ import asyncio
 import pytest
 
 import simloop
+from simloop import SeedReport, sim_test
 from simloop._explore import explore
 
 
@@ -102,3 +103,87 @@ def test_render_without_test_id_omits_replay_line() -> None:
     text = report.render()
     assert "replay:" not in text
     assert text.startswith("simloop: failed at seed 0")
+
+
+def test_sim_test_reraises_with_report_note() -> None:
+    @sim_test(seeds=10)
+    async def my_test() -> None:
+        await _fails_at(3)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        my_test()
+    notes = getattr(excinfo.value, "__notes__", [])
+    assert any("simloop: failed at seed 3" in note for note in notes)
+
+
+def test_sim_test_passes_quietly() -> None:
+    @sim_test(seeds=5)
+    async def my_test() -> None:
+        await _fails_at(99)
+
+    my_test()  # must simply return
+
+
+def test_sim_test_bare_form_defaults_to_ten_seeds() -> None:
+    ran: list[int] = []
+
+    @sim_test
+    async def my_test() -> None:
+        loop = asyncio.get_running_loop()
+        assert isinstance(loop, simloop.SimLoop)
+        ran.append(loop.seed)
+
+    my_test()
+    assert ran == list(range(10))
+
+
+def test_sim_test_respects_replay_override() -> None:
+    from simloop._explore import overrides
+
+    ran: list[int] = []
+
+    @sim_test(seeds=5)
+    async def my_test() -> None:
+        loop = asyncio.get_running_loop()
+        assert isinstance(loop, simloop.SimLoop)
+        ran.append(loop.seed)
+
+    overrides.replay = 42
+    try:
+        my_test()
+    finally:
+        overrides.replay = None
+    assert ran == [42]
+
+
+def test_sim_test_respects_seed_count_override() -> None:
+    from simloop._explore import overrides
+
+    ran: list[int] = []
+
+    @sim_test(seeds=2)
+    async def my_test() -> None:
+        loop = asyncio.get_running_loop()
+        assert isinstance(loop, simloop.SimLoop)
+        ran.append(loop.seed)
+
+    overrides.seeds = 4
+    try:
+        my_test()
+    finally:
+        overrides.seeds = None
+    assert ran == list(range(4))
+
+
+def test_sim_test_rejects_empty_seed_set() -> None:
+    with pytest.raises(ValueError):
+
+        @sim_test(seeds=0)
+        async def my_test() -> None:
+            pass
+
+
+def test_public_exports() -> None:
+    assert simloop.sim_test is sim_test
+    assert simloop.SeedReport is SeedReport
+    assert simloop.explore is explore

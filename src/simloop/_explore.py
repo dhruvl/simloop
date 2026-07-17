@@ -9,10 +9,11 @@ any test-framework dependency.
 from __future__ import annotations
 
 import asyncio
+import functools
 import os
 from collections.abc import Callable, Coroutine, Iterable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, overload
 
 from simloop._loop import SimLoop
 from simloop._trace import TraceEvent
@@ -152,3 +153,82 @@ def _drain(loop: SimLoop) -> None:
     except Exception:
         # The run is already over; teardown failures add nothing.
         pass
+
+
+@dataclass
+class _Overrides:
+    """Session state the pytest plugin writes; consulted by sim_test wrappers.
+
+    ``seeds`` and ``replay`` mirror the --simloop-* options; ``node_id`` is
+    the test currently running, so reports can print an exact replay
+    command. The counters feed the plugin's terminal summary.
+    """
+
+    seeds: int | None = None
+    replay: int | None = None
+    node_id: str | None = None
+    sim_tests: int = 0
+    seeds_explored: int = 0
+
+
+overrides = _Overrides()
+
+_TestFn = Callable[..., Coroutine[Any, Any, object]]
+
+
+@overload
+def sim_test(fn: _TestFn, /) -> Callable[..., None]: ...
+
+
+@overload
+def sim_test(
+    *, seeds: int = ..., trace_tail: int = ...
+) -> Callable[[_TestFn], Callable[..., None]]: ...
+
+
+def sim_test(
+    fn: _TestFn | None = None,
+    /,
+    *,
+    seeds: int = 10,
+    trace_tail: int = 20,
+) -> Callable[..., None] | Callable[[_TestFn], Callable[..., None]]:
+    """Turn an ``async def`` test into a seed-exploring synchronous test.
+
+    The wrapper runs the coroutine under ``seeds`` seeds (0..N-1) via
+    :func:`explore` and re-raises the first failure with the rendered
+    report attached as an exception note. Under pytest, the --simloop-seeds
+    and --simloop-replay options override the decorator's arguments.
+    """
+    if seeds < 1:
+        raise ValueError("seeds must be at least 1")
+
+    def decorate(test_fn: _TestFn) -> Callable[..., None]:
+        @functools.wraps(test_fn)
+        def wrapper(*args: Any, **kwargs: Any) -> None:
+            if overrides.replay is not None:
+                seed_set: range | tuple[int, ...] = (overrides.replay,)
+            elif overrides.seeds is not None:
+                seed_set = range(overrides.seeds)
+            else:
+                seed_set = range(seeds)
+            if len(seed_set) < 1:
+                raise ValueError("seeds must be at least 1")
+            report = explore(
+                functools.partial(test_fn, *args, **kwargs),
+                seed_set,
+                trace_tail=trace_tail,
+            )
+            overrides.sim_tests += 1
+            if report is None:
+                overrides.seeds_explored += len(seed_set)
+                return
+            overrides.seeds_explored += report.seeds_passed + 1
+            report.exception.add_note(report.render(overrides.node_id))
+            raise report.exception
+
+        return wrapper
+
+    if fn is not None:
+        return decorate(fn)
+    return decorate
