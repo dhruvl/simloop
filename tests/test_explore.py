@@ -1,6 +1,8 @@
 """Explorer core: first-failure seed search over fresh SimLoops."""
 
 import asyncio
+import subprocess
+import sys
 
 import pytest
 
@@ -187,3 +189,14 @@ def test_public_exports() -> None:
     assert simloop.sim_test is sim_test
     assert simloop.SeedReport is SeedReport
     assert simloop.explore is explore
+
+
+def test_import_simloop_does_not_import_pytest() -> None:
+    code = (
+        "import simloop, sys; "
+        "raise SystemExit(1 if 'pytest' in sys.modules else 0)"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True
+    )
+    assert proc.returncode == 0, proc.stderr
