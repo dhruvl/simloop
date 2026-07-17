@@ -22,6 +22,9 @@ dependencies = []
 [dependency-groups]
 dev = ["pytest>=8", "mypy>=1.11"]
 
+[project.entry-points.pytest11]
+simloop = "simloop._pytest_plugin"
+
 [build-system]
 requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
