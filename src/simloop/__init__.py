@@ -6,7 +6,7 @@ from simloop._net import Host, SimNetwork
 from simloop._sim import Sim, sim
 from simloop._trace import TraceEvent
 
-__version__ = "0.0.1.dev0"
+__version__ = "0.1.0"
 
 __all__ = [
     "Host",
