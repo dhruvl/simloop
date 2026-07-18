@@ -118,3 +118,19 @@ def test_renew_off_alone_stays_safe() -> None:
         helpers.verify(cluster)
 
     assert explore(scenario, range(75)) is None
+
+
+@pytest.mark.slow
+def test_broker_fencing_off_alone_stays_safe() -> None:
+    # Defense in depth: broker-side fencing is second-line. With the effect
+    # store intact, a zombie's stale commit is refused at the store no matter
+    # what the broker does, so turning broker fencing off alone stays safe
+    # across every seed.
+    async def scenario() -> None:
+        cluster = await helpers.zombie_run(
+            helpers.EffectStore(),
+            broker=helpers.Broker(fencing=False),
+        )
+        helpers.verify(cluster)
+
+    assert explore(scenario, range(75)) is None
