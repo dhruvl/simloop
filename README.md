@@ -101,7 +101,7 @@ dead-lettering) written in plain asyncio — tested end to end with
 simloop. Its suite runs hundreds of seeds of partitions, crashes, and
 poison jobs, and shows that removing any load-bearing safeguard produces
 a violation the explorer finds and replays from a seed. The bug table
-lives in [examples/jobqueue/README.md](examples/jobqueue/README.md).
+lives in [examples/jobqueue/README.md](https://github.com/dhruvl/simloop/blob/main/examples/jobqueue/README.md).
 
 ## Honest limits
 
@@ -109,7 +109,7 @@ Code that goes through the event-loop API is supported; code that
 bypasses it is fenced: threads and executors, raw sockets, subprocesses,
 signals, TLS, and `getaddrinfo` raise `SimulationFenceError` rather than
 silently breaking determinism. Write-side flow control is not simulated.
-The full contract is in [docs/supported-api.md](docs/supported-api.md).
+The full contract is in [docs/supported-api.md](https://github.com/dhruvl/simloop/blob/main/docs/supported-api.md).
 
 ## License
 
