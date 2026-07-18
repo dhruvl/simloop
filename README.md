@@ -103,6 +103,15 @@ poison jobs, and shows that removing any load-bearing safeguard produces
 a violation the explorer finds and replays from a seed. The bug table
 lives in [examples/jobqueue/README.md](https://github.com/dhruvl/simloop/blob/main/examples/jobqueue/README.md).
 
+## Performance
+
+Simulation is cheap: SimLoop schedules a task step in ~4.4 µs (trace
+recording included — about 3.6× faster than the stock loop, which pays a
+selector syscall per iteration), compresses sleep-heavy workloads ~2,000×
+against wall clock, and the explorer runs the full jobqueue chaos scenario
+at ~55 seeds/second on an M4 MacBook Air. Methodology and numbers:
+[benchmarks/README.md](https://github.com/dhruvl/simloop/blob/main/benchmarks/README.md).
+
 ## Honest limits
 
 Code that goes through the event-loop API is supported; code that
