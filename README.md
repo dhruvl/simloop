@@ -93,6 +93,16 @@ net.crash("node2")                              # no reset, just silence
 - **Replayable traces** — every scheduling and fault decision lands in
   an append-only trace whose hash proves a replay is exact.
 
+## Proving it: the jobqueue demo
+
+`examples/jobqueue/` is a complete distributed system — an exactly-once
+job scheduler (leases, fencing tokens, idempotency keys, backoff, and
+dead-lettering) written in plain asyncio — tested end to end with
+simloop. Its suite runs hundreds of seeds of partitions, crashes, and
+poison jobs, and shows that removing any load-bearing safeguard produces
+a violation the explorer finds and replays from a seed. The bug table
+lives in [examples/jobqueue/README.md](examples/jobqueue/README.md).
+
 ## Honest limits
 
 Code that goes through the event-loop API is supported; code that
