@@ -120,6 +120,14 @@ signals, TLS, and `getaddrinfo` raise `SimulationFenceError` rather than
 silently breaking determinism. Write-side flow control is not simulated.
 The full contract is in [docs/supported-api.md](https://github.com/dhruvl/simloop/blob/main/docs/supported-api.md).
 
+## Design
+
+Why the loop is a from-scratch `AbstractEventLoop` instead of an
+instrumented stock loop, why one seed feeds three separate RNG streams,
+why streams never lose bytes but datagrams do — the decisions and the
+alternatives they beat are written up in
+[docs/design.md](https://github.com/dhruvl/simloop/blob/main/docs/design.md).
+
 ## License
 
 MIT
