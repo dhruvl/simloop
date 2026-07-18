@@ -103,6 +103,15 @@ poison jobs, and shows that removing any load-bearing safeguard produces
 a violation the explorer finds and replays from a seed. The bug table
 lives in [examples/jobqueue/README.md](https://github.com/dhruvl/simloop/blob/main/examples/jobqueue/README.md).
 
+## Performance
+
+Simulation is cheap: SimLoop schedules a task step in ~4.4 µs (trace
+recording included — about 3.6× faster than the stock loop, which pays a
+selector syscall per iteration), compresses sleep-heavy workloads ~2,000×
+against wall clock, and the explorer runs the full jobqueue chaos scenario
+at ~55 seeds/second on an M4 MacBook Air. Methodology and numbers:
+[benchmarks/README.md](https://github.com/dhruvl/simloop/blob/main/benchmarks/README.md).
+
 ## Honest limits
 
 Code that goes through the event-loop API is supported; code that
@@ -110,6 +119,14 @@ bypasses it is fenced: threads and executors, raw sockets, subprocesses,
 signals, TLS, and `getaddrinfo` raise `SimulationFenceError` rather than
 silently breaking determinism. Write-side flow control is not simulated.
 The full contract is in [docs/supported-api.md](https://github.com/dhruvl/simloop/blob/main/docs/supported-api.md).
+
+## Design
+
+Why the loop is a from-scratch `AbstractEventLoop` instead of an
+instrumented stock loop, why one seed feeds three separate RNG streams,
+why streams never lose bytes but datagrams do — the decisions and the
+alternatives they beat are written up in
+[docs/design.md](https://github.com/dhruvl/simloop/blob/main/docs/design.md).
 
 ## License
 
