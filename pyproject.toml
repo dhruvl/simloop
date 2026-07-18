@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE"]
-authors = [{ name = "Dhruv Kumar Singh", email = "dsingh32@binghamton.edu" }]
+authors = [{ name = "Dhruv Kumar Singh", email = "singhdhruvk@gmail.com" }]
 keywords = ["asyncio", "testing", "deterministic", "simulation", "dst"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -18,6 +18,11 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/dhruvl/simloop"
+Repository = "https://github.com/dhruvl/simloop"
+Issues = "https://github.com/dhruvl/simloop/issues"
 
 [dependency-groups]
 dev = ["pytest>=8", "mypy>=1.11"]
