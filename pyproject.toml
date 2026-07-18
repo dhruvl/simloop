@@ -30,10 +30,11 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "examples/jobqueue/tests"]
 addopts = "-m 'not slow'"
-markers = ["slow: long-running replay-stability checks"]
+markers = ["slow: long-running seed sweeps and replay-stability checks"]
 
 [tool.mypy]
 strict = true
-files = ["src", "tests", "benchmarks"]
+files = ["src", "tests", "benchmarks", "examples/jobqueue"]
+mypy_path = "examples/jobqueue"
