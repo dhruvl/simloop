@@ -91,6 +91,7 @@ def test_jobqueue_stays_stdlib_only() -> None:
     code = (
         "import sys\n"
         "import jobqueue.wire\n"
+        "import jobqueue.store\n"
         "bad = sorted(m for m in sys.modules"
         " if m.split('.')[0] in ('simloop', 'pytest'))\n"
         "assert not bad, bad\n"
