@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 from dataclasses import dataclass
 from typing import Any
 
@@ -167,3 +168,19 @@ async def slow_job_run(store: EffectStore) -> Cluster:
     assert job_id is not None
     await settle(cluster, timeout_s=60.0)
     return cluster
+
+
+async def chaos(cluster: Cluster, rng: random.Random) -> None:
+    """A seed-derived fault schedule: partition windows, then one crash."""
+    loop = sim_loop()
+    for _ in range(3):
+        await asyncio.sleep(rng.uniform(0.5, 3.0))
+        victim = rng.choice(cluster.worker_hosts)
+        loop.net.partition([victim], ["broker"])
+        await asyncio.sleep(rng.uniform(0.5, 4.0))
+        loop.net.heal()
+    await asyncio.sleep(rng.uniform(0.5, 2.0))
+    victim = rng.choice(cluster.worker_hosts)
+    loop.net.host(victim).crash()
+    cluster.worker_hosts.remove(victim)
+    add_worker(cluster, f"{victim}r")
