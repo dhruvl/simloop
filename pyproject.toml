@@ -38,3 +38,9 @@ markers = ["slow: long-running seed sweeps and replay-stability checks"]
 strict = true
 files = ["src", "tests", "benchmarks", "examples/jobqueue"]
 mypy_path = "examples/jobqueue"
+
+[tool.hatch.build.targets.sdist]
+only-include = ["src/simloop"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/simloop"]
