@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from simloop import _explore
+from simloop._shrink import DEFAULT_BUDGET
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -28,11 +29,31 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         metavar="SEED",
         help="run every @sim_test at exactly this seed",
     )
+    group.addoption(
+        "--simloop-shrink",
+        action="store_true",
+        default=False,
+        help="minimize the failing seed's schedule (experimental, costs runs)",
+    )
+    group.addoption(
+        "--simloop-shrink-budget",
+        type=int,
+        default=DEFAULT_BUDGET,
+        metavar="N",
+        help="runs the schedule shrinker may spend on one failure",
+    )
 
 
 def pytest_configure(config: pytest.Config) -> None:
     _explore.overrides.seeds = config.getoption("--simloop-seeds")
     _explore.overrides.replay = config.getoption("--simloop-replay")
+    _explore.overrides.shrink = config.getoption("--simloop-shrink")
+    budget = config.getoption("--simloop-shrink-budget")
+    if budget < 1:
+        # Caught here rather than at the first failure, which could be many
+        # minutes into a session.
+        raise pytest.UsageError("--simloop-shrink-budget must be at least 1")
+    _explore.overrides.shrink_budget = budget
     _explore.overrides.sim_tests = 0
     _explore.overrides.seeds_explored = 0
 
@@ -40,6 +61,8 @@ def pytest_configure(config: pytest.Config) -> None:
 def pytest_unconfigure(config: pytest.Config) -> None:
     _explore.overrides.seeds = None
     _explore.overrides.replay = None
+    _explore.overrides.shrink = False
+    _explore.overrides.shrink_budget = DEFAULT_BUDGET
     _explore.overrides.node_id = None
 
 
