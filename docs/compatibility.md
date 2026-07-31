@@ -42,12 +42,12 @@ carries a date instead.
 | Library | Version | Verdict | Notes |
 |---|---|---|---|
 | aiohttp (server) | 3.14.3 | works: one GET over the sim network: 'HTTP/1.1 200 OK', body 'hello from the simulation' | AppRunner + loop.create_server on a sim host; raw sim-stream client. |
-| aiohttp (web.TCPSite) | 3.14.3 | fails: AttributeError: 'SimServer' object has no attribute 'sockets' | The documented AppRunner + TCPSite startup path, nothing else. |
+| aiohttp (web.TCPSite) | 3.14.3 | works: web.TCPSite(...).start() bound port 8081 on a sim host | The documented AppRunner + TCPSite startup path, nothing else. |
 | anyio | 4.14.2 | works: task group, memory object stream (one, two, three), anyio.sleep and move_on_after; virtual clock reached 1.75s | Asyncio backend only; nothing here touches a socket. |
 | redis (RESP wire protocol) | n/a | works: PING, SET and GET round trips over one connection: ['+PONG', '+OK', '0'] | Hand-rolled RESP over sim streams; no client library, no real server. |
-| websockets | 17.0.1 | fails: AttributeError: 'SimServer' object has no attribute 'sockets' | asyncio server and client on two sim hosts, ws:// only. |
+| websockets | 17.0.1 | works: handshake, one echoed frame ('HELLO') and close over ws:// | asyncio server and client on two sim hosts, ws:// only. |
 | aiohttp (client) | 3.14.3 | fenced: simloop does not simulate 'sock_connect'; see docs/supported-api.md for the supported asyncio subset | ClientSession GET at a sim host answered by a raw stream server. |
-| httpx | 0.28.1 | fails: ConnectError: [Errno 8] Name or service not known: b'web' | AsyncClient GET at a sim host answered by a raw stream server. |
+| httpx | 0.28.1 | fails: AttributeError: 'NoneType' object has no attribute 'getpeername' | AsyncClient GET at a sim host answered by a raw stream server. |
 
 Rows are grouped: the libraries expected to run on the loop first, then the
 client stacks expected to leave it.
@@ -58,18 +58,18 @@ client stacks expected to leave it.
 runs unchanged. That matters beyond anyio itself: it is the concurrency layer
 under httpx, starlette and anything built on `anyio.to_thread`-free code.
 
-**aiohttp's server** answers requests over the simulated network. The probe
-starts it with `AppRunner` and `loop.create_server` rather than `web.TCPSite`,
-because `TCPSite` does not get that far: it reads `server.sockets`, which the
-simulated server does not have (there are no sockets in the simulation). That
-is its own row, since `TCPSite` is what aiohttp's documentation and
-`web.run_app` use.
+**aiohttp's server** answers requests over the simulated network, both
+through `loop.create_server` directly and through the documented
+`AppRunner` + `web.TCPSite` startup path — the one `web.run_app` uses.
+The two rows exist because they once differed: `TCPSite` reads
+`server.sockets` during startup, which the simulated server did not answer
+until it learned to report an empty tuple (there are no sockets in a
+simulation, and the stdlib documents the tuple as possibly empty).
 
-**websockets** stops at the same attribute, in its own `serve()`. Both
-libraries read `sockets` only to report the address they bound — aiohttp to
-learn the port when `0` was requested, websockets to log where it is
-listening. Neither probe got past that line, so neither says anything about
-what the handshake or the frames would do.
+**websockets** completes a handshake, echoes a frame and closes cleanly
+over `ws://` between two sim hosts. Its `serve()` reads the same
+`server.sockets` attribute during startup — only to log where it is
+listening — so it was unblocked by the same empty tuple.
 
 **redis** has no row for a client library: every async Redis client needs a
 live server to reach its first command, and a live server is exactly what a
@@ -91,13 +91,16 @@ opens a real socket and calls `loop.sock_connect` on it. Raw sockets are
 fenced, so the simulation stops there rather than letting a real connection
 out.
 
-**httpx** never reaches a fence. It goes through httpcore and anyio, and
-anyio ASCII-encodes host names before resolving them
-(`idna2008_resolve` in `anyio/_core/_sockets.py`), so `loop.getaddrinfo`
-receives `b'web'` rather than `'web'`. The simulated resolver only accepts
-`str`, raises `socket.gaierror`, and httpx reports that as a `ConnectError`.
-The failing call is the resolver, not the connection: what anyio would do
-after resolving is untested here.
+**httpx** never reaches a fence, and gets further than its verdict looks.
+It goes through httpcore and anyio; anyio resolves the name (the simulated
+resolver accepts the ASCII-encoded form anyio sends), connects through
+`loop.create_connection`, and the connection *succeeds*. The failure is
+introspection after the fact: httpcore asks the new stream for its local
+and remote addresses, anyio answers by reading the raw socket object out of
+`transport.get_extra_info("socket")` (`anyio/abc/_sockets.py`,
+`extra_attributes`), and the simulation's honest answer for a transport
+with no operating-system socket is `None`. Whether a request would complete
+past that line is untested here.
 
 ## Not tested
 
