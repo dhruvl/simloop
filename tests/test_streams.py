@@ -308,6 +308,30 @@ def test_ssl_arguments_are_fenced() -> None:
         loop.close()
 
 
+def test_server_reports_no_sockets_while_serving() -> None:
+    # Server libraries read .sockets during startup to report their bound
+    # address, and the stdlib documents the tuple as possibly empty — so a
+    # simulated listener answers with none rather than not answering.
+    loop = _network()
+
+    async def main() -> None:
+        running = asyncio.get_running_loop()
+
+        async def serve() -> asyncio.AbstractServer:
+            return await running.create_server(asyncio.Protocol, "0.0.0.0", 9000)
+
+        server = await loop.net.host("server").create_task(serve())
+        assert server.sockets == ()
+        server.close()
+        await server.wait_closed()
+        assert server.sockets == ()
+
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()
+
+
 def test_server_close_stops_accepting() -> None:
     loop = _network()
 
