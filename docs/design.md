@@ -235,9 +235,45 @@ Two structural choices:
 - Failure reporting is part of the library, not the plugin, so the same
   report renders anywhere a coroutine can run.
 
-Schedule shrinking — reducing a failing seed's trace to a minimal
-interleaving — was considered and deferred; a seed plus an exact replay has
-proven sufficient to debug every failure so far.
+## Explaining a failure: diff, then shrink
+
+A seed plus an exact replay proved sufficient to *reproduce* every failure;
+explaining one still meant reading traces. Two additions close that gap,
+both riding the report rather than adding machinery to the loop's hot path.
+
+**Trace diff.** The explorer already knows the last passing seed, so it
+keeps that seed's trace — one trace, however many seeds run — and on
+failure reports the longest common prefix and the first event the two runs
+disagree on. Events compare by kind and label only: `when` and `seq`
+legitimately drift once interleavings differ, and comparing them would
+declare every pair of runs divergent at the first timer. Two seeds can also
+part ways in the opening bookkeeping, which is why an early split re-anchors
+its context at the first network event or clock advance instead of showing
+ten lines of task startup.
+
+**The policy seam.** The loop has exactly one ordering decision — which
+ready callback runs next — and it now flows through a policy object: seeded
+draws by default (byte-identical to owning the PRNG directly, held to that
+by the determinism suite), or a scripted replay of a recorded choice list.
+The recording makes a schedule *editable* where the seed only made it
+*repeatable*: a seed is a name for one schedule, but a choice list can be
+truncated, blanked to FIFO, or perturbed one decision at a time. Scripted
+runs tolerate drift on purpose — an out-of-range choice clamps, an
+exhausted recording falls back to FIFO — because an edited schedule that
+crashes the replayer answers nothing, while one that runs to a verdict
+answers the only question shrinking asks.
+
+**Shrinking is delta debugging over choices, judged by the exception.**
+Three passes, cheapest first: truncate the recording past the failure
+point, hand the longest possible prefix back to FIFO by binary search, then
+ddmin the window that survives. A candidate counts as the same failure when
+it raises the same exception type with the same message prefix — never by
+trace hash, which any edit changes by definition. The search is budget-
+capped and keeps the best failing candidate seen, so running out of budget
+degrades the answer instead of discarding it. The output names what ran at
+each kept step; `FIFO throughout` is itself a finding — the interleaving
+never mattered, and the fault stream, held fixed across every candidate, is
+where to look instead.
 
 ## What replay actually guarantees
 
@@ -284,8 +320,8 @@ simulation's blind spots like making it hold up something that matters.
 
 ## Future work
 
-Schedule shrinking (greedy trace reduction toward a minimal failing
-interleaving); trace diffing between the last passing and first failing
-seed; compatibility probes for popular pure-asyncio libraries; a
-`sock_*`-level simulation if real demand appears. Each is additive — the
-core contract above is meant to stay small and true.
+Compatibility probes for popular pure-asyncio libraries; in-simulation name
+resolution so `getaddrinfo`-shaped clients can connect; parallel seed
+exploration across processes; a `sock_*`-level simulation if real demand
+appears. Each is additive — the core contract above is meant to stay small
+and true.

@@ -22,55 +22,136 @@ same package and activates automatically.
 
 ## Find a bug, then replay it
 
+A counter service and two clients that each read the count and write back
+one more — the textbook lost update, over the wire:
+
 ```python
 import asyncio
 from simloop import sim_test
 
 
 @sim_test(seeds=200)
-async def test_replies_survive_a_lossy_network():
+async def test_two_increments_both_count():
     loop = asyncio.get_running_loop()
     loop.net.set_defaults(latency=(0.001, 0.050))
+    count = 0
 
     async def serve():
         async def handle(reader, writer):
-            writer.write((await reader.readline()).upper())
+            nonlocal count
+            line = await reader.readline()
+            if line == b"get\n":
+                writer.write(b"%d\n" % count)
+            else:
+                count = int(line)
+                writer.write(b"ok\n")
             writer.close()
 
         server = await asyncio.start_server(handle, port=8080)
         async with server:
             await server.serve_forever()
 
-    loop.net.host("server").create_task(serve())
+    async def call(line):
+        reader, writer = await asyncio.open_connection("counter", 8080)
+        writer.write(line)
+        reply = await reader.readline()
+        writer.close()
+        return reply
+
+    async def increment():
+        seen = int(await call(b"get\n"))
+        await call(b"%d\n" % (seen + 1))
+
+    loop.net.host("counter").create_task(serve())
     await asyncio.sleep(1.0)
 
-    async with asyncio.timeout(30.0):
-        reader, writer = await asyncio.open_connection("server", 8080)
-        writer.write(b"hello\n")
-        assert await reader.readline() == b"HELLO\n"
+    first = loop.net.host("a").create_task(increment())
+    await asyncio.sleep(0.2)
+    second = loop.net.host("b").create_task(increment())
+    await asyncio.gather(first, second)
+    assert count == 2
 ```
 
-`@sim_test(seeds=200)` runs the test under 200 seeds, each on a fresh
-simulated loop, and stops at the first failure:
+The second client starts 200 ms after the first, so on most latency draws
+the increments serialize and the test passes. `@sim_test(seeds=200)` runs
+the test under 200 seeds, each on a fresh simulated loop, and stops at the
+one where they overlap:
 
 ```
-simloop: failed at seed 41 (41 seeds passed first)
-replay: pytest 'tests/test_echo.py::test_replies_survive_a_lossy_network' --simloop-replay=41
+simloop: failed at seed 128 (128 seeds passed first)
+replay: pytest 'tests/test_counter.py::test_two_increments_both_count' --simloop-replay=128
 
 last 20 trace events:
-  [t=1.0312] net      seq=812  send driver>server
+  [t=1.3944] run      seq=58  SimNetwork._deliver
+  [t=1.3944] net      seq=23  send b>counter
+  ...
+  [t=1.3944] run      seq=70  SimLoop._stop_when_done
+
+runs agree for 38 events; passing then ran StreamReaderProtocol.connection_made.<locals>.callback, failing ran list.remove
+passing run:
+  [t=1.0944] schedule seq=13  SimNetwork._deliver
+  ...
+failing run:
+  [t=1.1224] schedule seq=13  SimNetwork._deliver
   ...
 pending tasks by host:
-  server  Task 'Task-2'  awaiting serve_forever  at ...
+  counter  Task 'Task-1026'  awaiting serve  at tests/test_counter.py:26
 ```
 
-The replay command reproduces the failure exactly — same scheduling
-decisions, same fault decisions, same trace. In CI, crank the search
-without touching code:
+The report names the failing seed, prints the exact command that replays
+it — same scheduling decisions, same fault decisions, same trace — and
+diffs the failing run against the last passing seed, so the first thing
+the two runs did differently is one line of output. In CI, crank the
+search without touching code:
 
 ```
 pytest --simloop-seeds=1000
 ```
+
+## Shrink the schedule to the race
+
+Most steps of a failing schedule are noise. With `--simloop-shrink`, the
+explorer replays edited copies of the recorded schedule, walking it back
+toward plain FIFO order until only the decisions that reproduce the
+failure remain — so the racing steps come out named:
+
+```python
+@sim_test(seeds=50)
+async def test_the_audit_sees_every_deposit():
+    loop = asyncio.get_running_loop()
+    ledger = {"balance": 0}
+    audited = []
+
+    def deposit():
+        ledger["balance"] += 1
+
+    def audit():
+        audited.append(ledger["balance"])
+
+    async def chatter():
+        for _ in range(20):
+            await asyncio.sleep(0.001)
+
+    background = [loop.create_task(chatter()) for _ in range(3)]
+    await asyncio.sleep(0.005)
+    loop.call_soon(deposit)
+    loop.call_soon(audit)
+    await asyncio.gather(*background)
+    assert audited == [1]
+```
+
+```
+schedule shrink (experimental): 137 steps recorded, 14 runs to minimize
+minimized: FIFO except step 36
+  step 36  test_the_audit_sees_every_deposit.<locals>.audit
+```
+
+One step out of 137 had to go a specific way: the audit ran before the
+deposit it should have seen. When shrinking instead reports `minimized:
+FIFO throughout`, that is an answer too — the interleaving never mattered,
+so look at the fault timings, not the task order. Shrinking is off by
+default (it costs extra runs, capped by `--simloop-shrink-budget`, default
+500) and experimental.
 
 ## What the simulation gives you
 
