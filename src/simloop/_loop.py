@@ -7,8 +7,9 @@ import gc
 import heapq
 import random
 import sys
+from array import array
 from asyncio import events
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextvars import Context
 from typing import TYPE_CHECKING, Any, NoReturn, TypeVarTuple, Unpack
 
@@ -16,6 +17,13 @@ if TYPE_CHECKING:
     from asyncio.events import _TaskFactory
 
 from simloop._net import SimNetwork
+from simloop._policy import (
+    CHOICE_TYPECODE,
+    MAX_CHOICE,
+    SchedulingPolicy,
+    ScriptedPolicy,
+    SeededPolicy,
+)
 from simloop._trace import TraceEvent, TraceRecorder
 
 _Ts = TypeVarTuple("_Ts")
@@ -81,7 +89,10 @@ class SimLoop(asyncio.AbstractEventLoop):
 
     def __init__(self, seed: int = 0) -> None:
         self._seed = seed
-        self._rng = random.Random(seed)
+        self._policy: SchedulingPolicy = SeededPolicy(seed)
+        # Every choice the policy made, in order, so a run's schedule can be
+        # replayed (or edited and replayed) without its seed.
+        self._choice_log: array[int] = array(CHOICE_TYPECODE)
         # Streams for user-facing entropy, derived from the seed but kept
         # separate from the scheduler's RNG: user draws must never perturb
         # scheduling order, and scheduling must never perturb user values.
@@ -108,6 +119,24 @@ class SimLoop(asyncio.AbstractEventLoop):
         self._task_factory: _TaskFactory | None = None
         self._net = SimNetwork(self)
 
+    @classmethod
+    def _from_choices(cls, choices: Iterable[int], fault_seed: int) -> SimLoop:
+        """Build a loop that replays ``choices`` on ``fault_seed``'s streams.
+
+        The scheduler follows the recorded choices instead of drawing, while
+        the network, user random and uuid streams remain the ones a plain
+        ``SimLoop(fault_seed)`` would have: building that loop first and
+        replacing only the policy is what guarantees it. A replay therefore
+        perturbs the schedule and nothing else.
+
+        Private on purpose: replaying a schedule apart from its seed is a
+        debugging tool, and a recorded choice list is only meaningful against
+        the exact code that produced it.
+        """
+        loop = cls(fault_seed)
+        loop._policy = ScriptedPolicy(choices)
+        return loop
+
     # ------------------------------------------------------------------
     # Introspection
     # ------------------------------------------------------------------
@@ -115,6 +144,25 @@ class SimLoop(asyncio.AbstractEventLoop):
     @property
     def seed(self) -> int:
         return self._seed
+
+    @property
+    def _choices(self) -> tuple[int, ...]:
+        """Every scheduling choice made so far, oldest first.
+
+        A snapshot rather than the live array: callers keep choice lists
+        across runs and replay edited copies of them, and a snapshot cannot
+        be invalidated by this loop running on.
+        """
+        return tuple(self._choice_log)
+
+    @property
+    def _diverged_at(self) -> int | None:
+        """Step index where a replay first departed from its recording.
+
+        ``None`` when the run followed its recording exactly, and always
+        ``None`` for a seeded run, which has no recording to depart from.
+        """
+        return self._policy.diverged_at
 
     @property
     def trace(self) -> tuple[TraceEvent, ...]:
@@ -177,9 +225,12 @@ class SimLoop(asyncio.AbstractEventLoop):
     def _step(self) -> None:
         if not self._ready:
             self._advance_clock()
-        # The one nondeterminism source in the whole loop, and it is seeded:
-        # every scheduling decision flows through this draw.
-        index = self._rng.randrange(len(self._ready))
+        # The one ordering decision in the whole loop, and the policy owns it:
+        # every scheduling decision flows through this call, which is seeded
+        # by default and scriptable for replay.
+        index = self._policy.choose(len(self._ready))
+        assert index <= MAX_CHOICE, "ready queue outgrew the choice log"
+        self._choice_log.append(index)
         seq, label, handle = self._ready.pop(index)
         if handle.cancelled():
             # The draw itself is a scheduling decision, so a skipped handle
