@@ -203,6 +203,9 @@ breaking determinism. Name resolution stays inside the simulation:
 raises `socket.gaierror` for anything else — no real DNS, ever.
 Write-side flow control is not simulated.
 The full contract is in [docs/supported-api.md](https://github.com/dhruvl/simloop/blob/main/docs/supported-api.md).
+What that contract costs real libraries — what aiohttp, anyio, websockets and
+httpx actually do under simulation, measured rather than promised — is in
+[docs/compatibility.md](https://github.com/dhruvl/simloop/blob/main/docs/compatibility.md).
 
 ## Design
 

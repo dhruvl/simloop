@@ -2,6 +2,11 @@
 
 ## 0.2.0 (unreleased)
 
+- Compatibility with third-party libraries is now measured instead of
+  claimed: `probes/` drives aiohttp, anyio, websockets, httpx and the Redis
+  wire protocol under a SimLoop, and `docs/compatibility.md` publishes what
+  each one did, verbatim. Dev-only — the probes are never packaged, their
+  pinned dependencies live in their own group, and CI does not run them.
 - Name resolution now stays inside the simulation: every sim host gets a
   stable synthetic IPv4 address (`10.7.0.0/16`, registration order), the
   loop's `getaddrinfo`/`getnameinfo` resolve names and addresses against

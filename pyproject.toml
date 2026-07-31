@@ -26,6 +26,15 @@ Issues = "https://github.com/dhruvl/simloop/issues"
 
 [dependency-groups]
 dev = ["pytest>=8", "mypy>=1.11"]
+# Third-party libraries the compatibility probes drive. Dev-only and pinned
+# exactly, so docs/compatibility.md's version column describes what actually
+# ran; never installed by a plain `uv run pytest`.
+probes = [
+    "aiohttp==3.14.3",
+    "anyio==4.14.2",
+    "httpx==0.28.1",
+    "websockets==17.0.1",
+]
 
 [project.entry-points.pytest11]
 simloop = "simloop._pytest_plugin"
@@ -41,8 +50,16 @@ markers = ["slow: long-running seed sweeps and replay-stability checks"]
 
 [tool.mypy]
 strict = true
-files = ["src", "tests", "benchmarks", "examples/jobqueue"]
+files = ["src", "tests", "benchmarks", "examples/jobqueue", "probes"]
 mypy_path = "examples/jobqueue"
+
+# The probes import their libraries inside the probe function, and the probes
+# group is not installed for a plain `uv sync`; type-checking them must not
+# depend on which third-party packages happen to be present.
+[[tool.mypy.overrides]]
+module = ["aiohttp.*", "anyio.*", "httpx.*", "websockets.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
 
 [tool.hatch.build.targets.sdist]
 only-include = ["src/simloop"]
