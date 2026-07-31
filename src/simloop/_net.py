@@ -10,6 +10,7 @@ an implicit ``driver`` host, so test glue needs no ceremony.
 from __future__ import annotations
 
 import random
+import socket
 from collections.abc import Iterable
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -30,6 +31,60 @@ _current_host: ContextVar[str] = ContextVar("simloop_current_host", default=DRIV
 # "|" and newline never occurring in a label; ">" is the separator inside
 # network labels themselves.
 _FORBIDDEN_NAME_CHARS = ("|", "\n", ">")
+
+# Synthetic addresses come out of 10.7.0.0/16: a private range, so a leaked
+# address can never be routed anywhere real, and wide enough that the offset
+# from the base is simply the host's registration index.
+_ADDRESS_BASE = 0x0A070000
+_ADDRESS_LIMIT = 0xFFFE
+
+# Names production code writes to mean "the machine I am running on".
+_LOCAL_NAMES = ("", "0.0.0.0", "localhost", "127.0.0.1")
+
+# One row per socket kind the network actually implements.
+_SOCKET_KINDS = (
+    (socket.SOCK_STREAM, socket.IPPROTO_TCP),
+    (socket.SOCK_DGRAM, socket.IPPROTO_UDP),
+)
+
+_AddrInfo = tuple[int, int, int, str, tuple[str, int]]
+
+
+def _format_address(index: int) -> str:
+    packed = _ADDRESS_BASE + index
+    return ".".join(str((packed >> shift) & 0xFF) for shift in (24, 16, 8, 0))
+
+
+def _gaierror(what: Any) -> socket.gaierror:
+    # EAI_NONAME is what a real resolver returns for a name that does not
+    # exist, so callers that special-case it keep working under simulation.
+    return socket.gaierror(socket.EAI_NONAME, f"Name or service not known: {what!r}")
+
+
+def _decoded(host: Any) -> Any:
+    # The stdlib resolver accepts ASCII bytes for host names, and resolver
+    # stacks lean on it: anyio IDNA-encodes every name before calling
+    # getaddrinfo, so bytes must mean here what they mean there. Bytes that
+    # are not ASCII could never name a registered host; everything else
+    # passes through for the caller's own validation to judge.
+    if isinstance(host, (bytes, bytearray)):
+        try:
+            return bytes(host).decode("ascii")
+        except UnicodeDecodeError:
+            return host
+    return host
+
+
+def _service_port(port: Any) -> int:
+    # Numeric services only: a service-name database is one more thing that
+    # would differ between machines, and nothing in the simulation needs it.
+    if port is None:
+        return 0
+    if isinstance(port, int) and not isinstance(port, bool):
+        return port
+    if isinstance(port, str) and port.isdigit():
+        return int(port)
+    raise _gaierror(port)
 
 
 @dataclass(slots=True)
@@ -171,6 +226,8 @@ class SimNetwork:
         # never perturb the scheduler's draws or the sim.* user streams.
         self._rng = random.Random(f"{loop.seed}:net")
         self._hosts: dict[str, Host] = {}
+        self._addresses: dict[str, str] = {}
+        self._names: dict[str, str] = {}
         self._alive: dict[str, bool] = {}
         self._tasks: dict[str, list[asyncio.Task[Any]]] = {}
         self._default_latency: tuple[float, float] = (0.0, 0.0)
@@ -197,11 +254,103 @@ class SimNetwork:
             raise ValueError("host name must be a non-empty string")
         if any(ch in name for ch in _FORBIDDEN_NAME_CHARS):
             raise ValueError(f"host name {name!r} may not contain '|', '>' or newline")
+        index = len(self._addresses) + 1
+        if index > _ADDRESS_LIMIT:
+            raise ValueError(
+                f"the simulated address range holds at most {_ADDRESS_LIMIT} hosts"
+            )
         host = Host(self, name)
         self._hosts[name] = host
+        address = _format_address(index)
+        self._addresses[name] = address
+        self._names[address] = name
         self._alive[name] = True
         self._tasks[name] = []
         return host
+
+    def address(self, name: str) -> str:
+        """The synthetic IPv4 address a host was given when it registered.
+
+        Addresses are handed out in registration order, so a run's addressing
+        is as reproducible as everything else in the simulation.
+        """
+        self._require_host(name)
+        return self._addresses[name]
+
+    def hostname(self, address: str) -> str:
+        """The host owning a synthetic address; the inverse of ``address``."""
+        name = self._names.get(address)
+        if name is None:
+            raise OSError(f"unknown address {address!r}")
+        return name
+
+    # ------------------------------------------------------------------
+    # Name resolution
+    # ------------------------------------------------------------------
+
+    def _resolve(self, host: Any) -> str:
+        """Map an endpoint address to the host name the packet layer uses.
+
+        Synthetic addresses are accepted anywhere a name is, so code that
+        resolved a name through ``getaddrinfo`` can connect to what it got
+        back without knowing it is talking to a simulated network.
+        """
+        host = _decoded(host)
+        if isinstance(host, str):
+            name = self._names.get(host)
+            if name is not None:
+                return name
+        return self._require_host(host)
+
+    def _lookup_address(self, host: Any) -> str:
+        host = _decoded(host)
+        if host is None or (isinstance(host, str) and host in _LOCAL_NAMES):
+            # Loopback-shaped names mean the calling task's own machine, the
+            # same reading _bind_address gives them.
+            return self._addresses[_current_host.get()]
+        if not isinstance(host, str):
+            raise _gaierror(host)
+        if host in self._names:
+            return host
+        address = self._addresses.get(host)
+        if address is None:
+            raise _gaierror(host)
+        return address
+
+    def _getaddrinfo(
+        self, host: Any, port: Any, family: int, type: int, proto: int, flags: int
+    ) -> list[_AddrInfo]:
+        # Resolver flags (AI_PASSIVE, AI_CANONNAME, ...) have nothing to vary
+        # here: one address per host, and no canonical names to report.
+        address = self._lookup_address(host)
+        number = _service_port(port)
+        rows: list[_AddrInfo] = [
+            (socket.AF_INET, kind, protocol, "", (address, number))
+            for kind, protocol in _SOCKET_KINDS
+            if type in (0, kind) and proto in (0, protocol)
+        ]
+        if family not in (0, socket.AF_INET) or not rows:
+            # Sim hosts are IPv4-only and speak TCP or UDP, so a request for
+            # anything else has no answer at all rather than a partial one.
+            raise _gaierror(host)
+        return rows
+
+    def _getnameinfo(self, sockaddr: Any, flags: int) -> tuple[str, str]:
+        if not isinstance(sockaddr, tuple) or len(sockaddr) < 2:
+            raise _gaierror(sockaddr)
+        address, port = sockaddr[0], sockaddr[1]
+        if not isinstance(address, str):
+            raise _gaierror(address)
+        if address in self._names:
+            name, numeric = self._names[address], address
+        elif address in self._addresses:
+            # Peer addresses inside the simulation are host names, so a caller
+            # can hand one straight back from get_extra_info("peername").
+            name, numeric = address, self._addresses[address]
+        else:
+            raise _gaierror(address)
+        resolved = numeric if flags & socket.NI_NUMERICHOST else name
+        return (resolved, str(_service_port(port)))
 
     def set_defaults(
         self,
@@ -451,9 +600,10 @@ class SimNetwork:
     async def _open_connection(
         self, protocol_factory: Any, host: Any, port: Any
     ) -> tuple[_SimStreamTransport, Any]:
+        host = _decoded(host)
         if not isinstance(host, str) or not isinstance(port, int):
             raise ValueError("host and port are required")
-        self._require_host(host)
+        host = self._resolve(host)
         src = _current_host.get()
         conn = self._next_conn
         self._next_conn += 1
@@ -510,11 +660,11 @@ class SimNetwork:
 
     def _bind_address(self, host: str | None, port: int) -> tuple[str, int]:
         owner = _current_host.get()
-        if host in (None, "", "0.0.0.0", "localhost", "127.0.0.1"):
+        if host is None or host in _LOCAL_NAMES:
             # Production-shaped bind addresses mean "this machine": the host
             # the calling task is pinned to.
             return (owner, port)
-        if host != owner:
+        if self._names.get(host, host) != owner:
             raise OSError(f"cannot bind to {host!r} from host {owner!r}")
         return (owner, port)
 
@@ -532,7 +682,7 @@ class SimNetwork:
             raise OSError(f"address {bind[0]!r}:{bind[1]} already in use")
         remote: tuple[str, int] | None = None
         if remote_addr is not None:
-            remote = (self._require_host(remote_addr[0]), remote_addr[1])
+            remote = (self._resolve(remote_addr[0]), remote_addr[1])
         transport = _SimDatagramTransport(self, bind, remote)
         self._datagrams[bind] = transport
         protocol = protocol_factory()
@@ -542,12 +692,11 @@ class SimNetwork:
     def _send_datagram(
         self, src: tuple[str, int], dst: tuple[str, int], payload: bytes
     ) -> None:
-        self._require_host(dst[0])
         self._transmit(
             _Packet(
                 kind="dgram",
                 src=src[0],
-                dst=dst[0],
+                dst=self._resolve(dst[0]),
                 src_port=src[1],
                 dst_port=dst[1],
                 conn=-1,

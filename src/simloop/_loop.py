@@ -400,6 +400,27 @@ class SimLoop(asyncio.AbstractEventLoop):
         _reject_kwargs("create_server", kwargs)
         return await self._net._start_server(protocol_factory, host, port)
 
+    async def getaddrinfo(
+        self,
+        host: Any,
+        port: Any,
+        *,
+        family: int = 0,
+        type: int = 0,
+        proto: int = 0,
+        flags: int = 0,
+    ) -> list[Any]:
+        """Resolve a name against the network's host table instead of DNS.
+
+        Resolution is a table lookup, not a scheduling decision: it never
+        blocks, never reaches the real resolver, and records no trace event,
+        so a run's schedule is unaffected by how often names are resolved.
+        """
+        return self._net._getaddrinfo(host, port, family, type, proto, flags)
+
+    async def getnameinfo(self, sockaddr: Any, flags: int = 0) -> tuple[str, str]:
+        return self._net._getnameinfo(sockaddr, flags)
+
     def set_task_factory(self, factory: _TaskFactory | None) -> None:
         if factory is not None and not callable(factory):
             raise TypeError("task factory must be a callable or None")
@@ -524,12 +545,6 @@ class SimLoop(asyncio.AbstractEventLoop):
 
     def shutdown_default_executor(self, *args: Any, **kwargs: Any) -> Any:
         _fence("shutdown_default_executor")
-
-    def getaddrinfo(self, *args: Any, **kwargs: Any) -> Any:
-        _fence("getaddrinfo")
-
-    def getnameinfo(self, *args: Any, **kwargs: Any) -> Any:
-        _fence("getnameinfo")
 
     def start_tls(self, *args: Any, **kwargs: Any) -> Any:
         _fence("start_tls")

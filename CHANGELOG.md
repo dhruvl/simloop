@@ -2,6 +2,11 @@
 
 ## 0.2.0 (unreleased)
 
+- Name resolution now stays inside the simulation: every sim host gets a
+  stable synthetic IPv4 address (`10.7.0.0/16`, registration order), the
+  loop's `getaddrinfo`/`getnameinfo` resolve names and addresses against
+  the topology (no real DNS), connections accept either form, and unknown
+  names raise `socket.gaierror` deterministically.
 - Failure reports now diff the failing seed's schedule against the last
   passing seed's: the report shows how long the two runs agreed, what each
   did at the first disagreement, and a window of context from both traces.

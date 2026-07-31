@@ -41,17 +41,26 @@ a host belong to an implicit `driver` host.
 | `loop.net.partition` / `heal` | Silent blackhole: datagrams are lost, stream traffic is held and resumes intact after healing; nothing errors — only your own timeouts fire |
 | `loop.net.crash` | A host's tasks are cancelled and it goes silent; no reset is sent — peers cannot tell a crash from a partition |
 | `transport.abort()` | Peer gets `connection_lost(ConnectionResetError)` |
+| `loop.getaddrinfo` | Resolves against the host table, never DNS: a registered host name, its synthetic address, or a loopback-shaped name (`None`, `""`, `localhost`, `127.0.0.1`, `0.0.0.0`) meaning the calling task's own host. Returns stdlib-shaped rows — `(AF_INET, SOCK_STREAM, IPPROTO_TCP, "", (address, port))` and the `SOCK_DGRAM` / `IPPROTO_UDP` row — filtered by `family`, `type` and `proto`. Ports are numeric (`int`, a digit string, or `None` for 0); resolver `flags` have nothing to vary |
+| `loop.getnameinfo` | Reverse lookup: a synthetic address maps back to its host name, and a host name (what `get_extra_info("peername")` reports) maps to itself. `NI_NUMERICHOST` returns the address instead; services are always numeric |
+| `loop.net.address` / `hostname` | The mapping itself: every registered host owns one synthetic IPv4 address from `10.7.0.0/16` — `10.7.0.1`, `10.7.0.2`, ... handed out in registration order, starting with the implicit `driver` host |
+
+Names and their synthetic addresses are interchangeable wherever an endpoint
+is accepted, so a client can resolve a name and connect to what it got back.
+Anything the host table cannot answer — an unknown name, an unassigned
+address, an `AF_INET6` or `SOCK_RAW` request, a service name — raises
+`socket.gaierror(EAI_NONAME)`. Resolution is a pure lookup, not a scheduling
+decision: it never blocks and records no trace event.
 
 Limitations, stated honestly: write-side flow control is not simulated
 (`drain()` never blocks, write buffers are unbounded, the peer cannot pause
 your writes); there is no retransmission or congestion model — streams are
-reliable by construction; addresses are host names, not IPs, and
-`getaddrinfo` stays fenced.
+reliable by construction; and addressing is IPv4-only and entirely synthetic
+— there are no routes, no netmasks, and no service-name database.
 
 ## Fenced
 
 Anything that reaches outside the simulation raises `SimulationFenceError`:
 executors and threads (`run_in_executor`, `call_soon_threadsafe`), signal
 handlers, subprocesses, raw sockets (`sock_*`), file-descriptor callbacks
-(`add_reader` / `add_writer`), name resolution (`getaddrinfo` /
-`getnameinfo`), TLS upgrades, `sendfile`, and pipes.
+(`add_reader` / `add_writer`), TLS upgrades, `sendfile`, and pipes.
