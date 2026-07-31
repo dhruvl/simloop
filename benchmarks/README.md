@@ -69,3 +69,64 @@ randomized partitions and a worker crash, then settles for up to 600
 simulated seconds and checks every invariant. 300 seeds complete in
 **5.4–6.0 s**, about **55 seeds/second**. A thousand-seed overnight search is
 a 20-second coffee break.
+
+## Campaigns
+
+Throughput is only interesting for what it buys: seeds by the hundred
+thousand. `benchmarks/campaign.py` spends them three ways, and records what
+it finds here.
+
+```
+uv run python benchmarks/campaign.py green      [--seeds N] [--jobs J] [--resume]
+uv run python benchmarks/campaign.py ablations  [--seeds N] [--jobs J] [--resume]
+uv run python benchmarks/campaign.py stability  [--sample K] [--reruns R]
+```
+
+`green` sweeps 100,000 seeds of the chaos scenario against the *intact*
+jobqueue, in 5,000-seed chunks across `--jobs` processes. Every seed must
+pass; a failing one prints its full report and exits nonzero, because an
+invariant broken by an intact jobqueue is the most interesting thing this
+repository could find.
+
+`ablations` switches one safeguard off at a time — the six mutations
+`examples/jobqueue/tests/test_mutations.py` pins — and sweeps 10,000 seeds
+each, counting *every* failing seed rather than stopping at the first. That
+turns "the explorer catches this bug" into a density: violations per 1,000
+seeds. Each failure is checked against the invariant its test claims;
+anything else is reported loudly.
+
+`stability` re-runs a sample of those failing seeds 100 times apiece and
+requires an identical trace hash every time — replay stability measured at
+campaign scale rather than on the handful of seeds the test suite covers.
+
+Both sweeps checkpoint to JSON after every chunk (`--checkpoint FILE`,
+default `campaign-{green,ablations}.json`) and resume from it with
+`--resume`, so a killed multi-hour run costs one chunk. `stability` reads
+the failing seeds out of the `ablations` checkpoint. These files are scratch,
+not repository content — they are gitignored.
+
+Results, recorded 2026-08-01 on the M4 MacBook Air (10 jobs):
+
+| campaign | scale | result |
+|---|---|---|
+| green | 100,000 seeds, 6.0 min, 279.6 seeds/s | green — no invariant violated |
+| ablations | 6 mutations × 10,000 seeds, 2.6 min | every ablation caught, densities below |
+| replay stability | 20 failing seeds × 100 re-runs | identical trace hash on every run |
+
+Per-ablation failure density:
+
+| ablation | failures / 10,000 | per 1,000 seeds | first failing seed | invariant |
+|---|---|---|---|---|
+| unfenced-store | 10,000 | 1000.0 | 0 | no-zombie-writes |
+| unidempotent-store | 10,000 | 1000.0 | 0 | exactly-once |
+| broker-fencing-off | 10,000 | 1000.0 | 0 | no-zombie-writes |
+| no-idempotency-key | 4,953 | 495.3 | 0 | exactly-once, convergence |
+| unbounded-attempts | 10,000 | 1000.0 | 0 | TimeoutError |
+| renew-off-unidempotent | 10,000 | 1000.0 | 0 | exactly-once |
+
+One thing only scale found: on 2 of the 10,000 `no-idempotency-key` seeds
+(3233 and 6475) the duplicate accepted without a key is still queued when
+the cluster settles, so the violation surfaces as `convergence` rather than
+`exactly-once`. The 200-seed test budget never reaches those seeds; both
+flavors are the same missing safeguard, and both replay from their seed
+with an identical trace hash.

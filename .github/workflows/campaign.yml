@@ -1,0 +1,26 @@
+name: Nightly campaign
+
+# A small standing seed sweep of the jobqueue demo, so the campaign numbers
+# published in benchmarks/README.md keep being re-earned after every change
+# rather than dating from one good afternoon. Deliberately modest: a few
+# thousand seeds fits the runner's two cores in minutes, and the 100k-seed
+# sweeps stay a local, documented exercise.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  campaign:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v8.3.2
+        with:
+          python-version: "3.12"
+      - run: uv sync
+      - run: uv run python benchmarks/campaign.py green --seeds 2000 --jobs 2 --checkpoint campaign-nightly.json
+      - run: uv run python benchmarks/campaign.py ablations --seeds 500 --jobs 2 --checkpoint campaign-nightly-ablations.json
+      - run: uv run python benchmarks/campaign.py stability --checkpoint campaign-nightly-ablations.json --sample 6 --reruns 20

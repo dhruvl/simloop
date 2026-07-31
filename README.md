@@ -193,8 +193,10 @@ lives in [examples/jobqueue/README.md](https://github.com/dhruvl/simloop/blob/ma
 Simulation is cheap: SimLoop schedules a task step in ~4.4 µs (trace
 recording included — about 3.6× faster than the stock loop, which pays a
 selector syscall per iteration), compresses sleep-heavy workloads ~2,000×
-against wall clock, and the explorer runs the full jobqueue chaos scenario
-at ~55 seeds/second on an M4 MacBook Air. Methodology and numbers:
+against wall clock, and with `--simloop-jobs` fanning seeds across
+processes, the full jobqueue chaos scenario sweeps 100,000 seeds in six
+minutes (~280 seeds/second) on an M4 MacBook Air. Methodology, numbers,
+and the campaign results:
 [benchmarks/README.md](https://github.com/dhruvl/simloop/blob/main/benchmarks/README.md).
 
 ## Honest limits
