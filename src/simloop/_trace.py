@@ -28,6 +28,12 @@ class TraceRecorder:
     def record(self, kind: EventKind, when: float, seq: int, label: str) -> None:
         self._events.append(TraceEvent(kind, when, seq, label))
 
+    def __len__(self) -> int:
+        # How many events so far, without building the snapshot tuple that
+        # ``events`` returns: callers that only need the count ask this on
+        # every step of a run.
+        return len(self._events)
+
     @property
     def events(self) -> tuple[TraceEvent, ...]:
         return tuple(self._events)

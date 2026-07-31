@@ -8,14 +8,15 @@ any test-framework dependency.
 
 from __future__ import annotations
 
-import asyncio
 import functools
 import os
 from collections.abc import Callable, Coroutine, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, overload
 
 from simloop._loop import SimLoop
+from simloop._run import Workload, finish, run_once
+from simloop._shrink import DEFAULT_BUDGET, ShrinkResult, shrink_schedule
 from simloop._trace import EventKind, TraceEvent
 
 # Events of context shown either side of the point two runs part ways.
@@ -25,6 +26,8 @@ _CONTEXT = 5
 _MIN_PREFIX = 5
 # Landmarks to align on instead, most informative first.
 _ANCHOR_KINDS: tuple[EventKind, ...] = ("net", "advance")
+# Kept steps listed before the shrink block starts summarizing.
+_KEPT_SHOWN = 12
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +75,7 @@ class SeedReport:
     trace_hash: str
     pending: tuple[PendingTask, ...]
     divergence: Divergence | None = None
+    shrunk: ShrinkResult | None = None
 
     def render(self, test_id: str | None = None) -> str:
         lines = [
@@ -89,6 +93,9 @@ class SeedReport:
         if self.divergence is not None:
             lines.append("")
             lines.extend(_render_divergence(self.divergence))
+        if self.shrunk is not None:
+            lines.append("")
+            lines.extend(_render_shrink(self.shrunk))
         if self.pending:
             lines.append("pending tasks by host:")
             for task in self.pending:
@@ -128,6 +135,29 @@ def _render_divergence(divergence: Divergence) -> list[str]:
     lines.extend(_format_event(event) for event in divergence.passing_context)
     lines.append("failing run:")
     lines.extend(_format_event(event) for event in divergence.failing_context)
+    return lines
+
+
+def _render_shrink(result: ShrinkResult) -> list[str]:
+    noun = "step" if result.original_len == 1 else "steps"
+    runs = "run" if result.oracle_runs == 1 else "runs"
+    lines = [
+        f"schedule shrink (experimental): {result.original_len:,} {noun} "
+        f"recorded, {result.oracle_runs:,} {runs} to minimize"
+    ]
+    if not result.kept:
+        # Nothing about the interleaving mattered: the failure reproduces
+        # with the scheduler taking the ready queue in order.
+        lines.append("minimized: FIFO throughout")
+        return lines
+    first, last = result.kept[0], result.kept[-1]
+    span = f"step {first:,}" if first == last else f"steps {first:,}-{last:,}"
+    lines.append(f"minimized: FIFO except {span}")
+    for step, label in zip(result.kept[:_KEPT_SHOWN], result.labels):
+        lines.append(f"  step {step:,}  {label}")
+    hidden = len(result.kept) - _KEPT_SHOWN
+    if hidden > 0:
+        lines.append(f"  ... and {hidden:,} more")
     return lines
 
 
@@ -203,10 +233,12 @@ def _window(
 
 
 def explore(
-    fn: Callable[[], Coroutine[Any, Any, object]],
+    fn: Workload,
     seeds: Iterable[int],
     *,
     trace_tail: int = 20,
+    shrink: bool = False,
+    shrink_budget: int = DEFAULT_BUDGET,
 ) -> SeedReport | None:
     """Run ``fn`` once per seed on a fresh SimLoop; stop at the first failure.
 
@@ -218,33 +250,46 @@ def explore(
     The most recent passing seed's full trace is held for comparison against
     the failing one. Only the last is kept, so the extra memory is one trace
     however many seeds are explored, and both traces are snapshotted before
-    ``_drain`` so that teardown scheduling cannot show up as a divergence.
+    teardown so that teardown scheduling cannot show up as a divergence.
+
+    ``shrink`` minimizes the failing seed's schedule, spending at most
+    ``shrink_budget`` further runs of ``fn`` on it. It is off by default
+    because it is experimental and, unlike everything else in the report,
+    not free.
     """
     passed = 0
     last_pass: tuple[TraceEvent, ...] = ()
     for seed in seeds:
         loop = SimLoop(seed)
         try:
-            try:
-                loop.run_until_complete(fn())
-            except Exception as exc:
-                events = loop.trace
-                return SeedReport(
-                    seed=seed,
-                    seeds_passed=passed,
-                    exception=exc,
-                    trace_events=events[-trace_tail:] if trace_tail else (),
-                    trace_hash=loop.trace_hash(),
-                    pending=_pending_tasks(loop),
-                    divergence=_diff_traces(last_pass, events),
-                )
-            else:
+            failure = run_once(loop, fn)
+            if failure is None:
                 last_pass = loop.trace
-            finally:
-                _drain(loop)
+                passed += 1
+                continue
+            events = loop.trace
+            report = SeedReport(
+                seed=seed,
+                seeds_passed=passed,
+                exception=failure,
+                trace_events=events[-trace_tail:] if trace_tail else (),
+                trace_hash=loop.trace_hash(),
+                pending=_pending_tasks(loop),
+                divergence=_diff_traces(last_pass, events),
+            )
+            choices = loop._choices
         finally:
-            loop.close()
-        passed += 1
+            finish(loop)
+        if not shrink:
+            return report
+        # Shrinking runs the workload many more times, so it happens with the
+        # failing seed's own loop already torn down.
+        return replace(
+            report,
+            shrunk=shrink_schedule(
+                fn, seed, choices, failure, budget=shrink_budget
+            ),
+        )
     return None
 
 
@@ -276,41 +321,20 @@ def _short_path(filename: str) -> str:
     return filename
 
 
-def _drain(loop: SimLoop) -> None:
-    """Cancel tasks a finished run left pending and let them unwind.
-
-    Without this, an abandoned task's garbage collection would route
-    "Task was destroyed but it is pending!" through the loop's exception
-    handler onto stderr long after the run ended.
-    """
-    pending = [
-        task
-        for tasks in loop.net._tasks.values()
-        for task in tasks
-        if not task.done()
-    ]
-    if not pending:
-        return
-    for task in pending:
-        task.cancel()
-    try:
-        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-    except Exception:
-        # The run is already over; teardown failures add nothing.
-        pass
-
-
 @dataclass
 class _Overrides:
     """Session state the pytest plugin writes; consulted by sim_test wrappers.
 
-    ``seeds`` and ``replay`` mirror the --simloop-* options; ``node_id`` is
-    the test currently running, so reports can print an exact replay
-    command. The counters feed the plugin's terminal summary.
+    ``seeds``, ``replay``, ``shrink`` and ``shrink_budget`` mirror the
+    --simloop-* options; ``node_id`` is the test currently running, so
+    reports can print an exact replay command. The counters feed the
+    plugin's terminal summary.
     """
 
     seeds: int | None = None
     replay: int | None = None
+    shrink: bool = False
+    shrink_budget: int = DEFAULT_BUDGET
     node_id: str | None = None
     sim_tests: int = 0
     seeds_explored: int = 0
@@ -343,7 +367,8 @@ def sim_test(
     The wrapper runs the coroutine under ``seeds`` seeds (0..N-1) via
     :func:`explore` and re-raises the first failure with the rendered
     report attached as an exception note. Under pytest, the --simloop-seeds
-    and --simloop-replay options override the decorator's arguments.
+    and --simloop-replay options override the decorator's arguments, and
+    --simloop-shrink adds a minimized schedule to the report.
     """
     if seeds < 1:
         raise ValueError("seeds must be at least 1")
@@ -363,6 +388,8 @@ def sim_test(
                 functools.partial(test_fn, *args, **kwargs),
                 seed_set,
                 trace_tail=trace_tail,
+                shrink=overrides.shrink,
+                shrink_budget=overrides.shrink_budget,
             )
             overrides.sim_tests += 1
             if report is None:

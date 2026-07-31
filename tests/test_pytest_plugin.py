@@ -70,6 +70,73 @@ def test_failure_report_diffs_against_the_last_passing_seed(
     )
 
 
+_LOST_UPDATE = """
+import asyncio
+from simloop import sim_test
+
+
+def bump(cell):
+    cell[0] += 1
+
+
+def read(cell, loop):
+    loop.call_soon(write, cell, cell[0])
+
+
+def write(cell, seen):
+    cell[0] = seen + 1
+
+
+@sim_test(seeds=10)
+async def test_flaky():
+    loop = asyncio.get_running_loop()
+    cell = [0]
+    loop.call_soon(bump, cell)
+    loop.call_soon(read, cell, loop)
+    await asyncio.sleep(0.01)
+    total = cell[0]
+    assert total == 2, "lost update"
+"""
+
+
+def test_shrink_flag_adds_a_minimized_schedule(pytester: pytest.Pytester) -> None:
+    pytester.makepyfile(test_demo=_LOST_UPDATE)
+    result = pytester.runpytest_subprocess("--simloop-shrink")
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(
+        [
+            "*schedule shrink (experimental): * steps recorded, * to minimize*",
+            "*minimized: FIFO except step *",
+            "*  step *  read*",
+        ]
+    )
+
+
+def test_no_shrink_block_by_default(pytester: pytest.Pytester) -> None:
+    pytester.makepyfile(test_demo=_LOST_UPDATE)
+    result = pytester.runpytest_subprocess()
+    result.assert_outcomes(failed=1)
+    result.stdout.no_fnmatch_line("*schedule shrink*")
+
+
+def test_shrink_budget_flag_caps_the_search(pytester: pytest.Pytester) -> None:
+    pytester.makepyfile(test_demo=_LOST_UPDATE)
+    result = pytester.runpytest_subprocess(
+        "--simloop-shrink", "--simloop-shrink-budget=1"
+    )
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(["*steps recorded, 1 run to minimize*"])
+
+
+def test_shrink_budget_flag_rejects_a_budget_below_one(
+    pytester: pytest.Pytester,
+) -> None:
+    pytester.makepyfile(test_demo=_LOST_UPDATE)
+    result = pytester.runpytest_subprocess("--simloop-shrink-budget=0")
+    assert result.ret != 0
+    result.stderr.fnmatch_lines(["*--simloop-shrink-budget must be at least 1*"])
+
+
 def test_replay_flag_runs_exactly_one_seed(pytester: pytest.Pytester) -> None:
     pytester.makepyfile(test_demo=_FLAKY)
     result = pytester.runpytest_subprocess("--simloop-replay=3")
