@@ -16,7 +16,15 @@ from dataclasses import dataclass
 from typing import Any, overload
 
 from simloop._loop import SimLoop
-from simloop._trace import TraceEvent
+from simloop._trace import EventKind, TraceEvent
+
+# Events of context shown either side of the point two runs part ways.
+_CONTEXT = 5
+# Below this much agreement the split point sits in the runs' opening
+# bookkeeping, where a window of context says nothing about the workload.
+_MIN_PREFIX = 5
+# Landmarks to align on instead, most informative first.
+_ANCHOR_KINDS: tuple[EventKind, ...] = ("net", "advance")
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +38,30 @@ class PendingTask:
 
 
 @dataclass(frozen=True, slots=True)
+class Divergence:
+    """Where a failing run's schedule parted from a passing run's.
+
+    ``prefix_len`` counts the leading events the two runs agree on, compared
+    by kind and label only: ``when`` and ``seq`` legitimately differ once the
+    interleaving does, so including them would report every run as diverging
+    at its first timer. ``passing_next`` and ``failing_next`` are what each
+    run did at the split point, or ``None`` for a run that ended there.
+
+    The context windows normally surround the split point. When the runs
+    split too early for that to carry any context, they surround a shared
+    landmark named by ``anchor`` instead; both windows are empty when no
+    landmark was worth showing either.
+    """
+
+    prefix_len: int
+    anchor: str | None
+    passing_next: TraceEvent | None
+    failing_next: TraceEvent | None
+    passing_context: tuple[TraceEvent, ...]
+    failing_context: tuple[TraceEvent, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class SeedReport:
     """Everything known about the first failing seed."""
 
@@ -39,6 +71,7 @@ class SeedReport:
     trace_events: tuple[TraceEvent, ...]
     trace_hash: str
     pending: tuple[PendingTask, ...]
+    divergence: Divergence | None = None
 
     def render(self, test_id: str | None = None) -> str:
         lines = [
@@ -52,11 +85,10 @@ class SeedReport:
         if self.trace_events:
             lines.append("")
             lines.append(f"last {len(self.trace_events)} trace events:")
-            for event in self.trace_events:
-                lines.append(
-                    f"  [t={event.when:.4f}] {event.kind:<8} "
-                    f"seq={event.seq}  {event.label}"
-                )
+            lines.extend(_format_event(event) for event in self.trace_events)
+        if self.divergence is not None:
+            lines.append("")
+            lines.extend(_render_divergence(self.divergence))
         if self.pending:
             lines.append("pending tasks by host:")
             for task in self.pending:
@@ -65,6 +97,109 @@ class SeedReport:
                     f"awaiting {task.awaiting}  at {task.where}"
                 )
         return "\n".join(lines)
+
+
+def _format_event(event: TraceEvent) -> str:
+    return (
+        f"  [t={event.when:.4f}] {event.kind:<8} "
+        f"seq={event.seq}  {event.label}"
+    )
+
+
+def _describe(event: TraceEvent | None, subject: str) -> str:
+    if event is None:
+        return f"{subject} ended"
+    # Clock advances carry no label; their kind is the whole story.
+    return f"{subject} ran {event.label or event.kind}"
+
+
+def _render_divergence(divergence: Divergence) -> list[str]:
+    if not divergence.passing_context and not divergence.failing_context:
+        return ["schedules diverge immediately"]
+    noun = "event" if divergence.prefix_len == 1 else "events"
+    lines = [
+        f"runs agree for {divergence.prefix_len:,} {noun}; "
+        f"{_describe(divergence.passing_next, 'passing then')}, "
+        f"{_describe(divergence.failing_next, 'failing')}"
+    ]
+    if divergence.anchor is not None:
+        lines.append(f"context anchored at the {divergence.anchor}")
+    lines.append("passing run:")
+    lines.extend(_format_event(event) for event in divergence.passing_context)
+    lines.append("failing run:")
+    lines.extend(_format_event(event) for event in divergence.failing_context)
+    return lines
+
+
+def _diff_traces(
+    passing: tuple[TraceEvent, ...],
+    failing: tuple[TraceEvent, ...],
+    *,
+    context: int = _CONTEXT,
+) -> Divergence | None:
+    """Find the first scheduling decision two runs disagreed on.
+
+    Returns ``None`` when there is nothing to explain: one of the runs left
+    no trace, or both made exactly the same decisions, which is the normal
+    case for a failure the interleaving did not cause.
+    """
+    if not passing or not failing:
+        return None
+    split = 0
+    for left, right in zip(passing, failing):
+        if (left.kind, left.label) != (right.kind, right.label):
+            break
+        split += 1
+    if split == len(passing) == len(failing):
+        return None
+    passing_next = passing[split] if split < len(passing) else None
+    failing_next = failing[split] if split < len(failing) else None
+    if split >= _MIN_PREFIX:
+        at_passing, at_failing = split, split
+        anchor = None
+    else:
+        anchored = _anchor(passing, failing)
+        if anchored is None:
+            return Divergence(split, None, passing_next, failing_next, (), ())
+        anchor, at_passing, at_failing = anchored
+    return Divergence(
+        prefix_len=split,
+        anchor=anchor,
+        passing_next=passing_next,
+        failing_next=failing_next,
+        passing_context=_window(passing, at_passing, context),
+        failing_context=_window(failing, at_failing, context),
+    )
+
+
+def _anchor(
+    passing: tuple[TraceEvent, ...], failing: tuple[TraceEvent, ...]
+) -> tuple[str, int, int] | None:
+    """Pick a landmark both runs reached, to align their windows on."""
+    for kind in _ANCHOR_KINDS:
+        at_passing = _first_of_kind(passing, kind)
+        at_failing = _first_of_kind(failing, kind)
+        if at_passing is None or at_failing is None:
+            continue
+        if at_passing == 0 and at_failing == 0:
+            # Aligning here would reprint the head of each trace, which is
+            # what a window at the split point already showed.
+            continue
+        return f"first {kind} event", at_passing, at_failing
+    return None
+
+
+def _first_of_kind(events: tuple[TraceEvent, ...], kind: EventKind) -> int | None:
+    for index, event in enumerate(events):
+        if event.kind == kind:
+            return index
+    return None
+
+
+def _window(
+    events: tuple[TraceEvent, ...], at: int, context: int
+) -> tuple[TraceEvent, ...]:
+    return events[max(0, at - context) : at + context]
 
 
 def explore(
@@ -79,22 +214,32 @@ def explore(
     ``Exception``, or ``None`` when every seed passed. ``BaseException``s
     that are not test failures (``KeyboardInterrupt``, ``SystemExit``)
     propagate immediately.
+
+    The most recent passing seed's full trace is held for comparison against
+    the failing one. Only the last is kept, so the extra memory is one trace
+    however many seeds are explored, and both traces are snapshotted before
+    ``_drain`` so that teardown scheduling cannot show up as a divergence.
     """
     passed = 0
+    last_pass: tuple[TraceEvent, ...] = ()
     for seed in seeds:
         loop = SimLoop(seed)
         try:
             try:
                 loop.run_until_complete(fn())
             except Exception as exc:
+                events = loop.trace
                 return SeedReport(
                     seed=seed,
                     seeds_passed=passed,
                     exception=exc,
-                    trace_events=loop.trace[-trace_tail:] if trace_tail else (),
+                    trace_events=events[-trace_tail:] if trace_tail else (),
                     trace_hash=loop.trace_hash(),
                     pending=_pending_tasks(loop),
+                    divergence=_diff_traces(last_pass, events),
                 )
+            else:
+                last_pass = loop.trace
             finally:
                 _drain(loop)
         finally:
