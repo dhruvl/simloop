@@ -164,6 +164,54 @@ def test_getaddrinfo_honors_type_family_and_proto_filters() -> None:
     assert len(_resolve("server", 80, family=socket.AF_INET)) == 2
 
 
+def test_getaddrinfo_accepts_a_bytes_host_name() -> None:
+    # Resolver stacks encode names before resolving them — anyio hands the
+    # stdlib resolver ASCII bytes — so bytes must resolve like their text.
+    assert _resolve(b"server", 9000) == _resolve("server", 9000)
+
+
+def test_non_ascii_bytes_hosts_raise_gaierror() -> None:
+    with pytest.raises(socket.gaierror):
+        _resolve(b"\xffserver", 9000)
+
+
+def test_streams_connect_to_a_bytes_host_name() -> None:
+    loop = _network()
+
+    async def serve() -> None:
+        server = await asyncio.start_server(_echo_line, port=9000)
+        async with server:
+            await asyncio.sleep(10.0)
+
+    async def request() -> bytes:
+        # The stdlib accepts encoded names at runtime even though its stubs
+        # say str, so the encoded form goes in behind an Any.
+        host: Any = b"server"
+        reader, writer = await asyncio.open_connection(host, 9000)
+        writer.write(b"ping\n")
+        await writer.drain()
+        reply = await reader.readline()
+        writer.close()
+        await writer.wait_closed()
+        return reply
+
+    async def main() -> bytes:
+        serve_task = loop.net.host("server").create_task(serve())
+        await asyncio.sleep(0.01)
+        reply: bytes = await loop.net.host("client").create_task(request())
+        serve_task.cancel()
+        try:
+            await serve_task
+        except asyncio.CancelledError:
+            pass
+        return reply
+
+    try:
+        assert loop.run_until_complete(main()) == b"PING\n"
+    finally:
+        loop.close()
+
+
 def test_getaddrinfo_accepts_numeric_service_forms() -> None:
     assert _resolve("server", "9000")[0][4] == ("10.7.0.2", 9000)
     assert _resolve("server", None)[0][4] == ("10.7.0.2", 0)

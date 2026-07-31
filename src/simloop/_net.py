@@ -61,6 +61,20 @@ def _gaierror(what: Any) -> socket.gaierror:
     return socket.gaierror(socket.EAI_NONAME, f"Name or service not known: {what!r}")
 
 
+def _decoded(host: Any) -> Any:
+    # The stdlib resolver accepts ASCII bytes for host names, and resolver
+    # stacks lean on it: anyio IDNA-encodes every name before calling
+    # getaddrinfo, so bytes must mean here what they mean there. Bytes that
+    # are not ASCII could never name a registered host; everything else
+    # passes through for the caller's own validation to judge.
+    if isinstance(host, (bytes, bytearray)):
+        try:
+            return bytes(host).decode("ascii")
+        except UnicodeDecodeError:
+            return host
+    return host
+
+
 def _service_port(port: Any) -> int:
     # Numeric services only: a service-name database is one more thing that
     # would differ between machines, and nothing in the simulation needs it.
@@ -281,6 +295,7 @@ class SimNetwork:
         resolved a name through ``getaddrinfo`` can connect to what it got
         back without knowing it is talking to a simulated network.
         """
+        host = _decoded(host)
         if isinstance(host, str):
             name = self._names.get(host)
             if name is not None:
@@ -288,6 +303,7 @@ class SimNetwork:
         return self._require_host(host)
 
     def _lookup_address(self, host: Any) -> str:
+        host = _decoded(host)
         if host is None or (isinstance(host, str) and host in _LOCAL_NAMES):
             # Loopback-shaped names mean the calling task's own machine, the
             # same reading _bind_address gives them.
@@ -584,6 +600,7 @@ class SimNetwork:
     async def _open_connection(
         self, protocol_factory: Any, host: Any, port: Any
     ) -> tuple[_SimStreamTransport, Any]:
+        host = _decoded(host)
         if not isinstance(host, str) or not isinstance(port, int):
             raise ValueError("host and port are required")
         host = self._resolve(host)
