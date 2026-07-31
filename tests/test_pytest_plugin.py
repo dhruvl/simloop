@@ -29,6 +29,47 @@ def test_failure_report_names_seed_and_replay_command(
     )
 
 
+_DIVERGING = """
+import asyncio
+from simloop import sim_test
+
+
+def tick_a():
+    pass
+
+
+def tick_b():
+    pass
+
+
+@sim_test(seeds=10)
+async def test_flaky():
+    loop = asyncio.get_running_loop()
+    for _ in range(3):
+        await asyncio.sleep(0)
+    for _ in range(6):
+        loop.call_soon(tick_a)
+        loop.call_soon(tick_b)
+        await asyncio.sleep(0)
+    assert loop.seed != 3
+"""
+
+
+def test_failure_report_diffs_against_the_last_passing_seed(
+    pytester: pytest.Pytester,
+) -> None:
+    pytester.makepyfile(test_demo=_DIVERGING)
+    result = pytester.runpytest_subprocess()
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(
+        [
+            "*runs agree for * events; passing then ran *, failing ran *",
+            "*passing run:*",
+            "*failing run:*",
+        ]
+    )
+
+
 def test_replay_flag_runs_exactly_one_seed(pytester: pytest.Pytester) -> None:
     pytester.makepyfile(test_demo=_FLAKY)
     result = pytester.runpytest_subprocess("--simloop-replay=3")
