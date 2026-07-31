@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 from dataclasses import dataclass
 from typing import Any
 
@@ -80,6 +81,24 @@ async def restart(cluster: Cluster, name: str) -> None:
     except asyncio.CancelledError:
         pass
     _boot(cluster, name, member.storage)
+
+
+async def chaos(cluster: Cluster, rng: random.Random) -> None:
+    """A seed-derived fault schedule: partition windows and process restarts.
+
+    Cut sizes never exceed half the cluster, so a quorum side always exists
+    and the driver -- which is never partitioned -- can keep proposing.
+    """
+    loop = sim_loop()
+    for _ in range(3):
+        await asyncio.sleep(rng.uniform(0.5, 2.0))
+        cut = rng.sample(cluster.names, rng.randint(1, (len(cluster.names) - 1) // 2))
+        rest = [name for name in cluster.names if name not in cut]
+        loop.net.partition(cut, rest)
+        await asyncio.sleep(rng.uniform(0.5, 3.0))
+        loop.net.heal()
+        if rng.random() < 0.5:
+            await restart(cluster, rng.choice(cluster.names))
 
 
 def leader_now(cluster: Cluster) -> str | None:
