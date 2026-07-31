@@ -50,7 +50,7 @@ class RaftNode:
         rng: random.Random,
         port: int = PORT,
         heartbeat_s: float = 0.15,
-        election_timeout_s: tuple[float, float] = (0.3, 0.6),
+        election_timeout_s: tuple[float, float] = (0.45, 0.9),
         rpc_timeout_s: float = 0.25,
         safeguards: Safeguards | None = None,
         events: list[Event] | None = None,
@@ -73,6 +73,7 @@ class RaftNode:
         self._next_index: dict[str, int] = {}
         self._match_index: dict[str, int] = {}
         self._reset = asyncio.Event()
+        self._stopped = False
 
     @property
     def name(self) -> str:
@@ -85,6 +86,197 @@ class RaftNode:
     @property
     def log(self) -> tuple[Entry, ...]:
         return tuple(self._state.log)
+
+    # ------------------------------------------------------------------
+    # The run loop: serve RPCs while cycling follower -> candidate -> leader
+    # ------------------------------------------------------------------
+
+    async def run(self) -> None:
+        handlers: set[asyncio.Task[None]] = set()
+
+        async def connection(
+            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        ) -> None:
+            task = asyncio.current_task()
+            assert task is not None
+            handlers.add(task)
+            task.add_done_callback(handlers.discard)
+            await self._connection(reader, writer)
+
+        server = await asyncio.start_server(connection, "0.0.0.0", self._port)
+        try:
+            while True:
+                if self.role == FOLLOWER:
+                    await self._follow()
+                elif self.role == CANDIDATE:
+                    await self._campaign()
+                else:
+                    await self._lead()
+        finally:
+            # A handler parked mid-request outlives this incarnation otherwise,
+            # and it still holds the storage the next one boots from: it would
+            # answer for a node that no longer exists, rolling the live term or
+            # vote backwards behind its back. The flag goes first because a
+            # handler started in the turn before it joined ``handlers`` is not
+            # in the sweep below; it checks the flag instead.
+            self._stopped = True
+            server.close()
+            for task in list(handlers):
+                task.cancel()
+
+    async def _connection(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        try:
+            message = await wire.read_message(reader)
+            if self._stopped:
+                return  # a dead incarnation must not touch shared storage
+            wire.write_message(writer, self.handle(message))
+            await writer.drain()
+        except (asyncio.IncompleteReadError, OSError, wire.FrameError):
+            # IncompleteReadError is named on its own because it is not an
+            # OSError. OSError here means a torn socket -- which also swallows
+            # one raised out of handle(), acceptable only while storage is in
+            # memory; a file-backed Storage needs its own except clause.
+            pass
+        finally:
+            writer.close()
+
+    async def _follow(self) -> None:
+        self._reset.clear()
+        try:
+            async with asyncio.timeout(self._rng.uniform(*self._election_timeout_s)):
+                await self._reset.wait()
+        except TimeoutError:
+            self.role = CANDIDATE
+
+    async def _campaign(self) -> None:
+        self._state.term += 1
+        self._state.voted_for = self._name
+        self._persist()
+        term = self._state.term
+        granted = 1
+        settled = asyncio.Event()  # the election is decided, one way or the other
+
+        async def solicit(peer: str) -> None:
+            nonlocal granted
+            reply = await wire.call(
+                peer,
+                self._port,
+                {
+                    "op": "request_vote",
+                    "term": term,
+                    "candidate": self._name,
+                    "last_log_index": len(self._state.log),
+                    "last_log_term": self._last_log_term(),
+                },
+                timeout_s=self._rpc_timeout_s,
+            )
+            if reply is None:
+                return
+            if reply["term"] > self._state.term:
+                # Ahead of the staleness guard below: a straggler reply from an
+                # abandoned candidacy still carries news we have to act on.
+                self._become_follower(reply["term"])
+                settled.set()
+                return
+            if self.role != CANDIDATE or self._state.term != term:
+                return
+            if reply["granted"]:
+                granted += 1
+                if granted >= self._quorum:
+                    settled.set()
+
+        solicitors = [asyncio.create_task(solicit(peer)) for peer in self._peers]
+        try:
+            async with asyncio.timeout(self._rng.uniform(*self._election_timeout_s)):
+                await settled.wait()
+        except TimeoutError:
+            return  # split vote or a lost election: run() re-reads the role
+        finally:
+            for task in solicitors:
+                task.cancel()
+            await asyncio.gather(*solicitors, return_exceptions=True)
+        if self.role == CANDIDATE and self._state.term == term:
+            self._become_leader()
+
+    def _become_leader(self) -> None:
+        self.role = LEADER
+        self._next_index = {peer: len(self._state.log) + 1 for peer in self._peers}
+        self._match_index = {peer: 0 for peer in self._peers}
+        self._record("leader", self._name, self._state.term, tuple(self._state.log))
+
+    async def _lead(self) -> None:
+        term = self._state.term
+        pushers = [
+            asyncio.create_task(self._push(peer, term)) for peer in self._peers
+        ]
+        try:
+            while self.role == LEADER and self._state.term == term:
+                await asyncio.sleep(self._heartbeat_s)
+        finally:
+            for task in pushers:
+                task.cancel()
+            await asyncio.gather(*pushers, return_exceptions=True)
+
+    async def _push(self, peer: str, term: int) -> None:
+        loop = asyncio.get_running_loop()
+        while True:
+            sent_at = loop.time()
+            prev = self._next_index[peer] - 1
+            entries = self._state.log[prev:]
+            reply = await wire.call(
+                peer,
+                self._port,
+                {
+                    "op": "append_entries",
+                    "term": term,
+                    "leader": self._name,
+                    "prev_log_index": prev,
+                    "prev_log_term": self._state.log[prev - 1].term if prev > 0 else 0,
+                    "entries": [[entry.term, entry.command] for entry in entries],
+                    "leader_commit": self.commit_index,
+                },
+                timeout_s=self._rpc_timeout_s,
+            )
+            if reply is not None and reply["term"] > self._state.term:
+                # Ahead of the staleness guard below: a straggler reply from a
+                # deposed leadership still carries news we have to act on.
+                self._become_follower(reply["term"])
+                return
+            if self.role != LEADER or self._state.term != term:
+                return
+            if reply is not None:
+                if reply["ok"]:
+                    self._match_index[peer] = prev + len(entries)
+                    self._next_index[peer] = prev + len(entries) + 1
+                    self._advance_commit(term)
+                else:
+                    self._next_index[peer] = max(1, self._next_index[peer] - 1)
+                    continue  # retry straight away, one entry earlier
+            # The pause runs from the send, not from the reply: pausing a whole
+            # interval *after* a round trip would make the real heartbeat period
+            # interval + round trip, which drifts into the follower's election
+            # timeout as soon as the links are slow.
+            await asyncio.sleep(max(0.0, sent_at + self._heartbeat_s - loop.time()))
+
+    def _advance_commit(self, term: int) -> None:
+        for index in range(len(self._state.log), self.commit_index, -1):
+            replicas = 1 + sum(
+                1 for match in self._match_index.values() if match >= index
+            )
+            if replicas < self._quorum:
+                continue
+            if (
+                self._safeguards.commit_own_term_only
+                and self._state.log[index - 1].term != term
+            ):
+                # Log terms never decrease, so once the scan walks back past our
+                # own term nothing below it can qualify either.
+                return
+            self.commit_index = index
+            self._apply()
+            return
 
     # ------------------------------------------------------------------
     # RPC handling: synchronous, so a request is atomic between awaits
