@@ -173,6 +173,10 @@ net.crash("node2")                              # no reset, just silence
 
 - **Replayable traces** — every scheduling and fault decision lands in
   an append-only trace whose hash proves a replay is exact.
+- **Seeded stand-ins** — `sim.random`, `sim.uuid4()` and `sim.time()`
+  draw from seed-derived streams inside a run and fall back to the
+  stdlib outside one, so code under test can use entropy and clocks
+  without breaking replay.
 
 ## Proving it: the jobqueue demo
 
@@ -203,6 +207,9 @@ breaking determinism. Name resolution stays inside the simulation:
 raises `socket.gaierror` for anything else — no real DNS, ever.
 Write-side flow control is not simulated.
 The full contract is in [docs/supported-api.md](https://github.com/dhruvl/simloop/blob/main/docs/supported-api.md).
+What that contract costs real libraries — what aiohttp, anyio, websockets and
+httpx actually do under simulation, measured rather than promised — is in
+[docs/compatibility.md](https://github.com/dhruvl/simloop/blob/main/docs/compatibility.md).
 
 ## Design
 
