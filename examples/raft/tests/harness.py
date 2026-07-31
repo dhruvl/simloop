@@ -12,6 +12,8 @@ from raft import wire
 from raft.node import LEADER, PORT, Event, RaftNode, Safeguards
 from raft.storage import Entry, MemoryStorage
 
+from checks import check_invariants
+
 
 def sim_loop() -> SimLoop:
     loop = asyncio.get_running_loop()
@@ -157,3 +159,8 @@ async def settle(cluster: Cluster, *, timeout_s: float = 120.0) -> None:
             if applied and applied[0] and all(a == applied[0] for a in applied):
                 return
             await asyncio.sleep(0.2)
+
+
+def verify(cluster: Cluster) -> None:
+    """Hold the run's whole history against the four safety claims."""
+    check_invariants(cluster.logs(), cluster.events)

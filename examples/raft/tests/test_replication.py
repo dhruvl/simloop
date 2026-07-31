@@ -22,6 +22,7 @@ async def test_commands_apply_everywhere_in_order() -> None:
     logs = [member.node.applied for member in cluster.members.values()]
     assert all(log == logs[0] for log in logs)
     assert [entry.command for entry in logs[0]] == ["k0", "k1", "k2"]
+    harness.verify(cluster)
 
 
 @sim_test
@@ -40,6 +41,7 @@ async def test_a_lagging_follower_catches_up() -> None:
         cluster.members[behind].node.applied
         == cluster.members[leader].node.applied
     )
+    harness.verify(cluster)
 
 
 @sim_test
@@ -55,6 +57,7 @@ async def test_committed_entries_survive_rolling_restarts() -> None:
     await harness.settle(cluster)
     for member in cluster.members.values():
         assert any(entry.command == "durable" for entry in member.node.applied)
+    harness.verify(cluster)
 
 
 @sim_test
@@ -76,3 +79,4 @@ async def test_a_deposed_leaders_unshared_entries_vanish() -> None:
         assert "lost" not in commands
         assert "keep" in commands
         assert "win" in commands
+    harness.verify(cluster)
