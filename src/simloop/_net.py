@@ -157,6 +157,19 @@ class SimServer(asyncio.AbstractServer):
     def is_serving(self) -> bool:
         return not self._closed_fut.done()
 
+    @property
+    def sockets(self) -> tuple[Any, ...]:
+        """Always empty: a simulated server owns no operating-system sockets.
+
+        Server libraries read this attribute to report which address they
+        bound — aiohttp's runner and websockets' serve loop both touch it
+        during startup — and they already handle a server with no sockets,
+        because the stdlib documents the tuple as possibly empty. Absent,
+        the attribute error aborts startup; empty, startup proceeds and the
+        simulation stays honest about what a listener here really is.
+        """
+        return ()
+
     def close_clients(self) -> None:
         """Close every connection this server accepted."""
         for transport in list(self._net._streams.values()):
