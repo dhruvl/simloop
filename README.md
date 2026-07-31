@@ -173,6 +173,10 @@ net.crash("node2")                              # no reset, just silence
 
 - **Replayable traces** — every scheduling and fault decision lands in
   an append-only trace whose hash proves a replay is exact.
+- **Seeded stand-ins** — `sim.random`, `sim.uuid4()` and `sim.time()`
+  draw from seed-derived streams inside a run and fall back to the
+  stdlib outside one, so code under test can use entropy and clocks
+  without breaking replay.
 
 ## Proving it: the jobqueue demo
 
