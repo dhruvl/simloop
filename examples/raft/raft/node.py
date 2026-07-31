@@ -121,10 +121,39 @@ class RaftNode:
         return {"term": self._state.term, "granted": True}
 
     def _handle_append_entries(self, m: dict[str, Any]) -> dict[str, Any]:
-        raise NotImplementedError  # next slice
+        if m["term"] > self._state.term:
+            self._become_follower(m["term"])
+        if self._safeguards.reject_stale_term and m["term"] < self._state.term:
+            return {"term": self._state.term, "ok": False}
+        if self.role == CANDIDATE:
+            self.role = FOLLOWER  # a live leader for this term beat us to it
+        self._reset.set()
+        log = self._state.log
+        prev = m["prev_log_index"]
+        if prev > len(log) or (prev > 0 and log[prev - 1].term != m["prev_log_term"]):
+            return {"term": self._state.term, "ok": False}
+        for offset, (entry_term, command) in enumerate(m["entries"]):
+            index = prev + 1 + offset
+            if index <= len(log) and log[index - 1].term != entry_term:
+                del log[index - 1 :]
+            if index > len(log):
+                log.append(Entry(entry_term, command))
+        self._persist()
+        if m["leader_commit"] > self.commit_index:
+            # max(): a backed-off heartbeat carries a short verified prefix;
+            # the commit mark never moves backwards for it.
+            self.commit_index = max(
+                self.commit_index, min(m["leader_commit"], prev + len(m["entries"]))
+            )
+            self._apply()
+        return {"term": self._state.term, "ok": True}
 
     def _handle_propose(self, m: dict[str, Any]) -> dict[str, Any]:
-        raise NotImplementedError  # next slice
+        if self.role != LEADER:
+            return {"ok": False}
+        self._state.log.append(Entry(self._state.term, m["command"]))
+        self._persist()
+        return {"ok": True, "index": len(self._state.log), "term": self._state.term}
 
     # ------------------------------------------------------------------
     # Shared transitions and bookkeeping
@@ -146,3 +175,12 @@ class RaftNode:
     def _record(self, *event: Any) -> None:
         if self._events is not None:
             self._events.append(event)
+
+    def _apply(self) -> None:
+        # The min() only matters when a disabled safeguard let the log shrink
+        # below the commit mark: apply what exists, and let the safety checks
+        # name the violation instead of an IndexError naming it first.
+        while len(self.applied) < min(self.commit_index, len(self._state.log)):
+            entry = self._state.log[len(self.applied)]
+            self.applied.append(entry)
+            self._record("apply", self._name, len(self.applied), entry.term, entry.command)
