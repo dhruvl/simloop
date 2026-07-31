@@ -9,12 +9,18 @@ any test-framework dependency.
 from __future__ import annotations
 
 import functools
+import inspect
 import os
 from collections.abc import Callable, Coroutine, Iterable
 from dataclasses import dataclass, replace
 from typing import Any, overload
 
 from simloop._loop import SimLoop
+from simloop._parallel import (
+    ModuleWorkload,
+    check_reproduced,
+    find_lowest_failure,
+)
 from simloop._run import Workload, finish, run_once
 from simloop._shrink import DEFAULT_BUDGET, ShrinkResult, shrink_schedule
 from simloop._trace import EventKind, TraceEvent
@@ -239,6 +245,7 @@ def explore(
     trace_tail: int = 20,
     shrink: bool = False,
     shrink_budget: int = DEFAULT_BUDGET,
+    jobs: int = 1,
 ) -> SeedReport | None:
     """Run ``fn`` once per seed on a fresh SimLoop; stop at the first failure.
 
@@ -256,41 +263,144 @@ def explore(
     ``shrink_budget`` further runs of ``fn`` on it. It is off by default
     because it is experimental and, unlike everything else in the report,
     not free.
+
+    ``jobs`` above 1 spreads the seeds over that many worker processes. The
+    report does not change — it describes the seed sequential exploration
+    would have stopped at, rebuilt by re-running that seed here — but the
+    workload has to survive pickling to reach a worker at all, so it must be
+    a module-level function or a partial of one.
     """
+    if jobs < 1:
+        raise ValueError("jobs must be at least 1")
+    if jobs > 1:
+        ordered = list(seeds)
+        if len(ordered) > 1:
+            return _explore_parallel(
+                fn,
+                ordered,
+                jobs=jobs,
+                trace_tail=trace_tail,
+                shrink=shrink,
+                shrink_budget=shrink_budget,
+            )
+        # One seed is one run: worth no process pool at all.
+        seeds = ordered
     passed = 0
     last_pass: tuple[TraceEvent, ...] = ()
     for seed in seeds:
-        loop = SimLoop(seed)
-        try:
-            failure = run_once(loop, fn)
-            if failure is None:
-                last_pass = loop.trace
-                passed += 1
-                continue
-            events = loop.trace
-            report = SeedReport(
-                seed=seed,
-                seeds_passed=passed,
-                exception=failure,
-                trace_events=events[-trace_tail:] if trace_tail else (),
-                trace_hash=loop.trace_hash(),
-                pending=_pending_tasks(loop),
-                divergence=_diff_traces(last_pass, events),
-            )
-            choices = loop._choices
-        finally:
-            finish(loop)
-        if not shrink:
-            return report
-        # Shrinking runs the workload many more times, so it happens with the
-        # failing seed's own loop already torn down.
-        return replace(
-            report,
-            shrunk=shrink_schedule(
-                fn, seed, choices, failure, budget=shrink_budget
-            ),
+        report, events = _run_seed(
+            fn,
+            seed,
+            passed,
+            last_pass,
+            trace_tail=trace_tail,
+            shrink=shrink,
+            shrink_budget=shrink_budget,
         )
+        if report is not None:
+            return report
+        last_pass = events
+        passed += 1
     return None
+
+
+def _run_seed(
+    fn: Workload,
+    seed: int,
+    seeds_passed: int,
+    last_pass: tuple[TraceEvent, ...],
+    *,
+    trace_tail: int,
+    shrink: bool,
+    shrink_budget: int,
+) -> tuple[SeedReport | None, tuple[TraceEvent, ...]]:
+    """Run one seed; report it if it failed, and hand back its trace either way.
+
+    The trace is the caller's business: a passing seed's is what the next
+    failure gets diffed against.
+    """
+    loop = SimLoop(seed)
+    try:
+        failure = run_once(loop, fn)
+        events = loop.trace
+        if failure is None:
+            return None, events
+        report = SeedReport(
+            seed=seed,
+            seeds_passed=seeds_passed,
+            exception=failure,
+            trace_events=events[-trace_tail:] if trace_tail else (),
+            trace_hash=loop.trace_hash(),
+            pending=_pending_tasks(loop),
+            divergence=_diff_traces(last_pass, events),
+        )
+        choices = loop._choices
+    finally:
+        finish(loop)
+    if not shrink:
+        return report, events
+    # Shrinking runs the workload many more times, so it happens with the
+    # failing seed's own loop already torn down.
+    return (
+        replace(
+            report,
+            shrunk=shrink_schedule(fn, seed, choices, failure, budget=shrink_budget),
+        ),
+        events,
+    )
+
+
+def _explore_parallel(
+    fn: Workload,
+    seeds: list[int],
+    *,
+    jobs: int,
+    trace_tail: int,
+    shrink: bool,
+    shrink_budget: int,
+) -> SeedReport | None:
+    """Search ``seeds`` in worker processes, then build the report here.
+
+    Workers answer only with which seed failed and how, so the report is
+    made the way it always was: by running the failing seed, and the seed
+    below it for the schedule diff, on this process's own loops. Two runs
+    on top of the search — and both of them check that the seed does the
+    same thing here as it did in the worker, which is the one thing a
+    parallel run can get away with quietly breaking.
+    """
+    found = find_lowest_failure(fn, seeds, jobs=jobs)
+    if found is None:
+        return None
+    last_pass: tuple[TraceEvent, ...] = ()
+    if found.at > 0:
+        below = seeds[found.at - 1]
+        passing, last_pass = _run_seed(
+            fn,
+            below,
+            found.at - 1,
+            (),
+            trace_tail=trace_tail,
+            shrink=False,
+            shrink_budget=shrink_budget,
+        )
+        check_reproduced(
+            below, None, passing.exception if passing is not None else None
+        )
+    seed = seeds[found.at]
+    report, _ = _run_seed(
+        fn,
+        seed,
+        found.at,
+        last_pass,
+        trace_tail=trace_tail,
+        shrink=shrink,
+        shrink_budget=shrink_budget,
+    )
+    check_reproduced(
+        seed, found, report.exception if report is not None else None
+    )
+    assert report is not None, "the parent reproduced the worker's failure"
+    return report
 
 
 def _pending_tasks(loop: SimLoop) -> tuple[PendingTask, ...]:
@@ -325,8 +435,8 @@ def _short_path(filename: str) -> str:
 class _Overrides:
     """Session state the pytest plugin writes; consulted by sim_test wrappers.
 
-    ``seeds``, ``replay``, ``shrink`` and ``shrink_budget`` mirror the
-    --simloop-* options; ``node_id`` is the test currently running, so
+    ``seeds``, ``replay``, ``shrink``, ``shrink_budget`` and ``jobs`` mirror
+    the --simloop-* options; ``node_id`` is the test currently running, so
     reports can print an exact replay command. The counters feed the
     plugin's terminal summary.
     """
@@ -335,6 +445,7 @@ class _Overrides:
     replay: int | None = None
     shrink: bool = False
     shrink_budget: int = DEFAULT_BUDGET
+    jobs: int = 1
     node_id: str | None = None
     sim_tests: int = 0
     seeds_explored: int = 0
@@ -343,6 +454,32 @@ class _Overrides:
 overrides = _Overrides()
 
 _TestFn = Callable[..., Coroutine[Any, Any, object]]
+
+
+def _worker_workload(
+    test_fn: _TestFn, args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> Workload:
+    """Address a decorated test so that worker processes can find it.
+
+    The wrapper a worker would have to receive is a closure over
+    ``test_fn``, and closures do not pickle; a file and a name do. What
+    that rules out is a test whose arguments the workers would also have to
+    reconstruct, which means fixtures: those stay sequential, loudly rather
+    than by quietly running one process after all.
+    """
+    where = inspect.getsourcefile(test_fn)
+    name = test_fn.__qualname__
+    if args or kwargs:
+        raise TypeError(
+            f"{name} takes arguments, and pytest fixtures cannot be rebuilt "
+            "in a worker process: run it without --simloop-jobs"
+        )
+    if where is None or "." in name:
+        raise TypeError(
+            f"{name} is not importable by name from a file, so worker "
+            "processes cannot reach it: run it without --simloop-jobs"
+        )
+    return ModuleWorkload(os.path.abspath(where), test_fn.__name__)
 
 
 @overload
@@ -367,8 +504,9 @@ def sim_test(
     The wrapper runs the coroutine under ``seeds`` seeds (0..N-1) via
     :func:`explore` and re-raises the first failure with the rendered
     report attached as an exception note. Under pytest, the --simloop-seeds
-    and --simloop-replay options override the decorator's arguments, and
-    --simloop-shrink adds a minimized schedule to the report.
+    and --simloop-replay options override the decorator's arguments,
+    --simloop-shrink adds a minimized schedule to the report, and
+    --simloop-jobs spreads the seeds over worker processes.
     """
     if seeds < 1:
         raise ValueError("seeds must be at least 1")
@@ -384,12 +522,19 @@ def sim_test(
                 seed_set = range(seeds)
             if len(seed_set) < 1:
                 raise ValueError("seeds must be at least 1")
+            jobs = overrides.jobs
+            workload: Workload = (
+                _worker_workload(test_fn, args, kwargs)
+                if jobs > 1 and len(seed_set) > 1
+                else functools.partial(test_fn, *args, **kwargs)
+            )
             report = explore(
-                functools.partial(test_fn, *args, **kwargs),
+                workload,
                 seed_set,
                 trace_tail=trace_tail,
                 shrink=overrides.shrink,
                 shrink_budget=overrides.shrink_budget,
+                jobs=jobs,
             )
             overrides.sim_tests += 1
             if report is None:

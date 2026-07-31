@@ -137,6 +137,103 @@ def test_shrink_budget_flag_rejects_a_budget_below_one(
     result.stderr.fnmatch_lines(["*--simloop-shrink-budget must be at least 1*"])
 
 
+def test_jobs_flag_reports_the_seed_a_sequential_run_would(
+    pytester: pytest.Pytester,
+) -> None:
+    pytester.makepyfile(test_demo=_FLAKY)
+    result = pytester.runpytest_subprocess("--simloop-jobs=2", "--simloop-seeds=64")
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(
+        ["*simloop: failed at seed 3 (3 seeds passed first)*"]
+    )
+
+
+def test_jobs_flag_passes_a_clean_test(pytester: pytest.Pytester) -> None:
+    pytester.makepyfile(
+        test_demo="""
+import asyncio
+from simloop import sim_test
+
+
+@sim_test(seeds=40)
+async def test_clean():
+    await asyncio.sleep(0.1)
+"""
+    )
+    result = pytester.runpytest_subprocess("--simloop-jobs=2")
+    result.assert_outcomes(passed=1)
+    result.stdout.fnmatch_lines(["*simloop: 1 sim test, 40 seeds explored*"])
+
+
+_WITH_FIXTURE = """
+import asyncio
+import pytest
+from simloop import sim_test
+
+
+@pytest.fixture
+def bad_seed():
+    return 3
+
+
+@sim_test(seeds=40)
+async def test_flaky(bad_seed):
+    loop = asyncio.get_running_loop()
+    await asyncio.sleep(1.0)
+    assert loop.seed != bad_seed
+"""
+
+
+def test_jobs_flag_refuses_a_test_taking_fixtures(pytester: pytest.Pytester) -> None:
+    pytester.makepyfile(test_demo=_WITH_FIXTURE)
+    result = pytester.runpytest_subprocess()
+    result.assert_outcomes(failed=1)
+    result = pytester.runpytest_subprocess("--simloop-jobs=2")
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(
+        [
+            "*fixtures cannot be rebuilt in a worker process: "
+            "run it without --simloop-jobs*"
+        ]
+    )
+
+
+_ONLY_IN_A_WORKER = """
+import asyncio
+import multiprocessing
+from simloop import sim_test
+
+
+@sim_test(seeds=40)
+async def test_flaky():
+    await asyncio.sleep(1.0)
+    assert multiprocessing.parent_process() is None, "ran in a child process"
+"""
+
+
+def test_jobs_flag_really_runs_seeds_in_other_processes(
+    pytester: pytest.Pytester,
+) -> None:
+    # A workload that can tell which process it is in: sequentially it passes,
+    # and under --simloop-jobs it fails in the workers and then refuses to
+    # reproduce in the parent, which is the loud path for a broken replay.
+    pytester.makepyfile(test_demo=_ONLY_IN_A_WORKER)
+    result = pytester.runpytest_subprocess()
+    result.assert_outcomes(passed=1)
+    result = pytester.runpytest_subprocess("--simloop-jobs=2")
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(
+        ["*replay did not hold across processes for this workload*"]
+    )
+
+
+def test_jobs_flag_rejects_a_job_count_below_one(pytester: pytest.Pytester) -> None:
+    pytester.makepyfile(test_demo=_FLAKY)
+    result = pytester.runpytest_subprocess("--simloop-jobs=0")
+    assert result.ret != 0
+    result.stderr.fnmatch_lines(["*--simloop-jobs must be at least 1*"])
+
+
 def test_replay_flag_runs_exactly_one_seed(pytester: pytest.Pytester) -> None:
     pytester.makepyfile(test_demo=_FLAKY)
     result = pytester.runpytest_subprocess("--simloop-replay=3")

@@ -24,6 +24,13 @@
   default (traces byte-identical to 0.1.0), with recorded choice lists that
   can replay a schedule independently of its seed (internal, powers
   shrinking).
+- Seed exploration can use every core: `explore(fn, seeds, jobs=N)` and
+  `--simloop-jobs=N` fan seed batches out over worker processes and report
+  exactly what a sequential run would have — the earliest failing seed, with
+  its report rebuilt by re-running that seed in the parent, which also
+  proves the replay held across processes. Workloads must be picklable to
+  cross that boundary, so lambdas, closures and fixture-taking tests stay
+  sequential and say so.
 - Schedule shrinking, experimental: `--simloop-shrink` (or
   `explore(shrink=True)`) minimizes a failing schedule toward FIFO order,
   keeping only the decisions that reproduce the failure and naming what ran
