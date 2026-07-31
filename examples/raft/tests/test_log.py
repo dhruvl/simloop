@@ -79,6 +79,15 @@ def test_commits_and_applies_up_to_the_leaders_mark() -> None:
     assert events == [("apply", "n1", 1, 1, "a")]
 
 
+def test_a_noop_advances_commit_but_not_the_state_machine() -> None:
+    events: list[Event] = []
+    node = make_node(events=events)
+    append(node, entries=[[1, ""], [1, "x"]], commit=2)
+    assert node.commit_index == 2
+    assert node.applied == [Entry(1, "x")]
+    assert events == [("apply", "n1", 2, 1, "x")]
+
+
 def test_never_commits_past_what_it_verified() -> None:
     node = make_node()
     append(node, entries=[[1, "a"]], commit=9)
@@ -128,3 +137,25 @@ def test_propose_appends_on_the_leader() -> None:
     reply = node.handle({"op": "propose", "command": "x"})
     assert reply == {"ok": True, "index": 1, "term": 2}
     assert node.log == (Entry(2, "x"),)
+
+
+def test_propose_refuses_an_empty_command() -> None:
+    node = make_node(term=2)
+    node.role = LEADER
+    assert node.handle({"op": "propose", "command": ""}) == {"ok": False}
+
+
+def test_a_new_leader_opens_its_term_with_a_noop() -> None:
+    node = make_node(term=3, log=[Entry(1, "a")])
+    node._become_leader()
+    assert node.log == (Entry(1, "a"), Entry(3, ""))
+    assert node._next_index == {"n2": 2, "n3": 2}
+    assert node._match_index == {"n2": 0, "n3": 0}
+
+
+def test_the_noop_stays_off_when_disabled() -> None:
+    node = make_node(
+        term=3, log=[Entry(1, "a")], safeguards=Safeguards(leader_noop=False)
+    )
+    node._become_leader()
+    assert node.log == (Entry(1, "a"),)

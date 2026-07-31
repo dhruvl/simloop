@@ -8,7 +8,8 @@ from typing import Any
 
 from simloop import SimLoop, sim
 
-from raft.node import LEADER, Event, RaftNode, Safeguards
+from raft import wire
+from raft.node import LEADER, PORT, Event, RaftNode, Safeguards
 from raft.storage import Entry, MemoryStorage
 
 
@@ -110,3 +111,49 @@ async def wait_for_leader(
             await asyncio.sleep(settle_s)
             if leader_now(cluster) == leader:
                 return leader
+
+
+def applied_anywhere(cluster: Cluster, command: str) -> bool:
+    return any(
+        any(entry.command == command for entry in member.node.applied)
+        for member in cluster.members.values()
+    )
+
+
+async def propose(cluster: Cluster, command: str, *, timeout_s: float = 30.0) -> None:
+    """Submit to whoever leads until the command lands in an applied log.
+
+    At-least-once: if a leader accepts the command and is then deposed
+    before committing, the retry can commit it twice under different
+    indices. The invariants don't mind -- client-session dedupe is one of
+    the things this demo honestly does not implement.
+    """
+    async with asyncio.timeout(timeout_s):
+        while True:
+            for name in cluster.names:
+                reply = await wire.call(
+                    name, PORT, {"op": "propose", "command": command}, timeout_s=0.5
+                )
+                if reply is not None and reply.get("ok"):
+                    for _ in range(10):  # give the commit a moment before resubmitting
+                        if applied_anywhere(cluster, command):
+                            return
+                        await asyncio.sleep(0.2)
+            if applied_anywhere(cluster, command):
+                return
+            await asyncio.sleep(0.2)
+
+
+async def settle(cluster: Cluster, *, timeout_s: float = 120.0) -> None:
+    """Wait (in virtual time) until every live member applied the same sequence."""
+    async with asyncio.timeout(timeout_s):
+        while True:
+            live = [
+                member.node
+                for member in cluster.members.values()
+                if not member.task.done()
+            ]
+            applied = [node.applied for node in live]
+            if applied and applied[0] and all(a == applied[0] for a in applied):
+                return
+            await asyncio.sleep(0.2)

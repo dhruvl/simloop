@@ -6,6 +6,8 @@ live in small named methods, and every safety-critical rule sits behind a
 explorer find the violation it causes.
 
 Indices are 1-based, as in the paper: raft index ``i`` is ``log[i - 1]``.
+The empty command is reserved: a leader opens each term with a no-op entry the
+state machine never sees, and propose refuses it.
 """
 
 from __future__ import annotations
@@ -37,7 +39,11 @@ class Safeguards:
     one_vote_per_term: bool = True      # never grant two candidates one term
     check_log_up_to_date: bool = True   # §5.4.1: voters gate on log freshness
     persist_before_reply: bool = True   # durability before acknowledgement
-    commit_own_term_only: bool = True   # §5.4.2: count replicas only for own-term entries
+    # §5.4.2: count replicas only for own-term entries. With leader_noop on,
+    # every reachable quorum index already carries the leader's term, so this
+    # gate only shows its teeth when the no-op is off too.
+    commit_own_term_only: bool = True
+    leader_noop: bool = True            # §8: open each term with a no-op so a quiet term can still commit
 
 
 class RaftNode:
@@ -70,6 +76,7 @@ class RaftNode:
         self.role = FOLLOWER
         self.commit_index = 0
         self.applied: list[Entry] = []
+        self._applied_index = 0
         self._next_index: dict[str, int] = {}
         self._match_index: dict[str, int] = {}
         self._reset = asyncio.Event()
@@ -204,6 +211,14 @@ class RaftNode:
         self.role = LEADER
         self._next_index = {peer: len(self._state.log) + 1 for peer in self._peers}
         self._match_index = {peer: 0 for peer in self._peers}
+        # A term with no client traffic must still be able to commit: the
+        # own-term rule only counts replicas for this term, so open the term
+        # with a no-op entry the state machine will never see. The indices
+        # above are deliberately computed before this append, so the first
+        # push to each peer carries the no-op against a prev the peer has.
+        if self._safeguards.leader_noop:
+            self._state.log.append(Entry(self._state.term, ""))
+            self._persist()
         self._record("leader", self._name, self._state.term, tuple(self._state.log))
 
     async def _lead(self) -> None:
@@ -343,6 +358,8 @@ class RaftNode:
     def _handle_propose(self, m: dict[str, Any]) -> dict[str, Any]:
         if self.role != LEADER:
             return {"ok": False}
+        if not m["command"]:
+            return {"ok": False}  # the empty command is the no-op sentinel
         self._state.log.append(Entry(self._state.term, m["command"]))
         self._persist()
         return {"ok": True, "index": len(self._state.log), "term": self._state.term}
@@ -372,7 +389,13 @@ class RaftNode:
         # The min() only matters when a disabled safeguard let the log shrink
         # below the commit mark: apply what exists, and let the safety checks
         # name the violation instead of an IndexError naming it first.
-        while len(self.applied) < min(self.commit_index, len(self._state.log)):
-            entry = self._state.log[len(self.applied)]
-            self.applied.append(entry)
-            self._record("apply", self._name, len(self.applied), entry.term, entry.command)
+        # The cursor is a raft index, not a count of applied entries: a no-op
+        # advances it without reaching the state machine, so the two diverge.
+        while self._applied_index < min(self.commit_index, len(self._state.log)):
+            entry = self._state.log[self._applied_index]
+            self._applied_index += 1
+            if entry.command:
+                self._record(
+                    "apply", self._name, self._applied_index, entry.term, entry.command
+                )
+                self.applied.append(entry)
