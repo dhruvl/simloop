@@ -42,6 +42,13 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         metavar="N",
         help="runs the schedule shrinker may spend on one failure",
     )
+    group.addoption(
+        "--simloop-jobs",
+        type=int,
+        default=1,
+        metavar="N",
+        help="explore each @sim_test's seeds across N worker processes",
+    )
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -54,6 +61,10 @@ def pytest_configure(config: pytest.Config) -> None:
         # minutes into a session.
         raise pytest.UsageError("--simloop-shrink-budget must be at least 1")
     _explore.overrides.shrink_budget = budget
+    jobs = config.getoption("--simloop-jobs")
+    if jobs < 1:
+        raise pytest.UsageError("--simloop-jobs must be at least 1")
+    _explore.overrides.jobs = jobs
     _explore.overrides.sim_tests = 0
     _explore.overrides.seeds_explored = 0
 
@@ -63,6 +74,7 @@ def pytest_unconfigure(config: pytest.Config) -> None:
     _explore.overrides.replay = None
     _explore.overrides.shrink = False
     _explore.overrides.shrink_budget = DEFAULT_BUDGET
+    _explore.overrides.jobs = 1
     _explore.overrides.node_id = None
 
 
