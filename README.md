@@ -197,8 +197,11 @@ at ~55 seeds/second on an M4 MacBook Air. Methodology and numbers:
 
 Code that goes through the event-loop API is supported; code that
 bypasses it is fenced: threads and executors, raw sockets, subprocesses,
-signals, TLS, and `getaddrinfo` raise `SimulationFenceError` rather than
-silently breaking determinism. Write-side flow control is not simulated.
+signals, and TLS raise `SimulationFenceError` rather than silently
+breaking determinism. Name resolution stays inside the simulation:
+`getaddrinfo` resolves sim host names to stable synthetic addresses and
+raises `socket.gaierror` for anything else — no real DNS, ever.
+Write-side flow control is not simulated.
 The full contract is in [docs/supported-api.md](https://github.com/dhruvl/simloop/blob/main/docs/supported-api.md).
 
 ## Design

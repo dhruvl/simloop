@@ -134,7 +134,7 @@ production.
 ## Fail loudly: the fence policy
 
 Anything that would reach outside the simulation — executors and threads,
-signals, subprocesses, raw sockets, `add_reader`/`add_writer`, `getaddrinfo`,
+signals, subprocesses, raw sockets, `add_reader`/`add_writer`,
 TLS, pipes, `sendfile` — raises `SimulationFenceError` naming the exact call,
 and optional stdlib kwargs that would smuggle those in (`ssl=`, `sock=`, …)
 are rejected the same way.
@@ -164,7 +164,12 @@ the boundary.
 loop's own `create_connection` / `create_server` /
 `create_datagram_endpoint`, so `asyncio.open_connection` and friends work
 unchanged. Addresses are host names: `loop.net.host("broker")` declares a
-machine, and multi-node systems run as tasks in one process.
+machine, and multi-node systems run as tasks in one process. Each host also
+gets a stable synthetic IPv4 address (`10.7.0.0/16`, assigned in
+registration order), and the loop's `getaddrinfo` resolves names to those
+addresses without leaving the simulation — so client code that insists on
+resolving before connecting still works, and an unknown name fails with the
+same `socket.gaierror` a real resolver would raise.
 
 The transport layer could have been a pair of byte queues per connection —
 far simpler, and how most asyncio test mocks do it. It models packets
@@ -320,8 +325,7 @@ simulation's blind spots like making it hold up something that matters.
 
 ## Future work
 
-Compatibility probes for popular pure-asyncio libraries; in-simulation name
-resolution so `getaddrinfo`-shaped clients can connect; parallel seed
+Compatibility probes for popular pure-asyncio libraries; parallel seed
 exploration across processes; a `sock_*`-level simulation if real demand
 appears. Each is additive — the core contract above is meant to stay small
 and true.
