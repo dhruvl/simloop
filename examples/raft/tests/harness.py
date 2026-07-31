@@ -180,6 +180,46 @@ async def settle(cluster: Cluster, *, timeout_s: float = 120.0) -> None:
             await asyncio.sleep(0.2)
 
 
+async def figure_eight(safeguards: Safeguards) -> Cluster:
+    """The paper's Figure 8: an old-term entry reaches a quorum much later.
+
+    With the commit gate on, that entry may only commit once an entry of
+    the sitting leader's own term commits above it; with the gate off, a
+    counting leader commits it directly -- and a rival with a later-term
+    log can still erase it.
+    """
+    loop = sim_loop()
+    cluster = await start_cluster(size=5, safeguards=safeguards)
+    s1 = await wait_for_leader(cluster)
+    await propose(cluster, "a")
+    others = [name for name in cluster.names if name != s1]
+    buddy = others[0]
+    # "b" lands on s1 and buddy only, then the pair is cut off.
+    loop.net.partition([s1, buddy], others[1:])
+    await wire.call(s1, PORT, {"op": "propose", "command": "b"}, timeout_s=1.0)
+    await asyncio.sleep(0.5)
+    # The majority elects a new leader; it takes "c" and is cut before
+    # replicating it anywhere (on the seeds where the race lands that way).
+    s5 = await wait_for_leader(cluster, timeout_s=30.0, settle_s=1.0)
+    await wire.call(s5, PORT, {"op": "propose", "command": "c"}, timeout_s=1.0)
+    loop.net.heal()
+    loop.net.partition([s5], [name for name in cluster.names if name != s5])
+    # s1's side can now retake the cluster and spread "b" to a quorum. The
+    # two followers s5 left behind keep timing out and campaigning, and each
+    # doomed run -- their logs are short of s1's, so the up-to-date check
+    # refuses them -- drags the term up before s1 can win one of its own. The
+    # window has to cover those rounds plus the catch-up.
+    await asyncio.sleep(5.0)
+    loop.net.heal()
+    loop.net.partition([s1], [name for name in cluster.names if name != s1])
+    # With s1 gone and s5 back, s5's later-term log can win and erase "b".
+    # A settle() here would only ever time out: the gate is exercisable only
+    # with the no-op off, and s1 -- still cut away -- never catches up.
+    await propose(cluster, "d", timeout_s=60.0)
+    await asyncio.sleep(2.0)
+    return cluster
+
+
 def verify(cluster: Cluster) -> None:
     """Hold the run's whole history against the four safety claims."""
     check_invariants(cluster.logs(), cluster.events)
