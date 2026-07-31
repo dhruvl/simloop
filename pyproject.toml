@@ -44,14 +44,15 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "examples/jobqueue/tests"]
+testpaths = ["tests", "examples/jobqueue/tests", "examples/raft/tests"]
 addopts = "-m 'not slow'"
 markers = ["slow: long-running seed sweeps and replay-stability checks"]
 
 [tool.mypy]
 strict = true
-files = ["src", "tests", "benchmarks", "examples/jobqueue", "probes"]
-mypy_path = "examples/jobqueue"
+files = ["src", "tests", "benchmarks", "examples/jobqueue", "examples/raft", "probes"]
+mypy_path = ["examples/jobqueue", "examples/raft"]
+exclude = ['examples/raft/conftest\.py']
 
 # The probes import their libraries inside the probe function, and the probes
 # group is not installed for a plain `uv sync`; type-checking them must not
