@@ -11,5 +11,9 @@ build/
 .pytest_cache/
 .ruff_cache/
 
+# Campaign checkpoints (benchmarks/campaign.py); results belong in
+# benchmarks/README.md, not in a scratch file at the repository root.
+campaign-*.json
+
 # OS
 .DS_Store
