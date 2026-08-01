@@ -2,6 +2,21 @@
 
 ## 0.2.0 (unreleased)
 
+- Crashed hosts can come back: `loop.net.restart(name)` (or
+  `host.restart()`) revives a machine as a fresh incarnation. It restores
+  liveness and nothing else — the old tasks stay cancelled and the
+  listeners are gone, so the caller boots the machine again the way it
+  booted it the first time — and traffic due while the host was dead is
+  lost, leaving peers to notice the outage from their own timeouts.
+- Every host now has `host.disk`, a mapping that survives its crashes:
+  where state a real process would fsync belongs. Writes are atomic at
+  assignment; there is no partial-write model.
+- Clocks can lie per host: `loop.net.set_clock(name, offset=...)` skews
+  what that host's tasks read from `loop.time()`, and the deadlines they
+  hand to `call_at` with it, while durations (`sleep`, `timeout`,
+  `wait_for`, `call_later`) cost the same everywhere — which is what a
+  wrong wall clock does to a real machine. Traces stay on the true clock,
+  and runs that configure no offset are byte-identical to before.
 - A second flagship demo: `examples/raft/` is a teaching-sized Raft (leader
   election + log replication, plain asyncio on streams) tested only under
   simulation — four safety invariants checked over 50,000 chaos seeds, five

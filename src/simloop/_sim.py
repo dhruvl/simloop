@@ -45,8 +45,9 @@ class Sim:
         return uuid.UUID(int=loop._uuid_random.getrandbits(128), version=4)
 
     def time(self) -> float:
-        """Seconds: virtual loop time inside a run (starting at 0.0, not the
-        epoch), wall-clock ``time.time()`` outside."""
+        """Seconds: virtual loop time inside a run, wall-clock ``time.time()``
+        outside. Virtual time is not the epoch — it follows the calling
+        host's clock, which starts at 0.0 unless that host is skewed."""
         loop = _running_sim_loop()
         if loop is None:
             return time.time()

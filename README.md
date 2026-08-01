@@ -171,6 +171,14 @@ loop.call_later(5.0, net.heal)                  # heals in virtual time
 net.crash("node2")                              # no reset, just silence
 ```
 
+- **Crashes with a way back** — `net.crash` kills a host's tasks and
+  binds, `net.restart` brings it back as a fresh incarnation, and
+  `host.disk` is a mapping that outlives both: machines die, reboot, and
+  remember what they wrote down.
+- **Clocks that lie** — `net.set_clock(name, offset=...)` skews what one
+  host reads from the clock without changing how long anything takes, for
+  testing lease and timeout code against machines that disagree about the
+  time.
 - **Replayable traces** — every scheduling and fault decision lands in
   an append-only trace whose hash proves a replay is exact.
 - **Seeded stand-ins** — `sim.random`, `sim.uuid4()` and `sim.time()`
