@@ -13,7 +13,7 @@ import inspect
 import math
 import os
 from collections.abc import Callable, Coroutine, Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, overload
 
 from simloop._loop import SimLoop
@@ -25,6 +25,7 @@ from simloop._parallel import (
 from simloop._policy import PCTPolicy, SchedulingPolicy
 from simloop._run import Workload, finish, run_once
 from simloop._shrink import DEFAULT_BUDGET, ShrinkResult, shrink_schedule
+from simloop._timeline import timeline_html
 from simloop._trace import EventKind, TraceEvent
 
 # How the scheduler may be driven while exploring: seeded uniform draws, or
@@ -123,7 +124,16 @@ class PolicyRun:
 
 @dataclass(frozen=True, slots=True)
 class SeedReport:
-    """Everything known about the first failing seed."""
+    """Everything known about the first failing seed.
+
+    ``trace_events`` is the tail the rendered report prints; ``trace`` is
+    every event the failing run recorded, which is what a timeline draws. The
+    tail is a slice of the same run, so the two agree by construction.
+
+    ``trace`` stays out of the repr: it can hold tens of thousands of events,
+    and this object is reachable from a failing test's traceback, where a
+    dataclass repr would print the whole run into the terminal.
+    """
 
     seed: int
     seeds_passed: int
@@ -134,8 +144,15 @@ class SeedReport:
     divergence: Divergence | None = None
     shrunk: ShrinkResult | None = None
     policy: PolicyRun | None = None
+    trace: tuple[TraceEvent, ...] = field(default=(), repr=False)
 
-    def render(self, test_id: str | None = None) -> str:
+    def render(
+        self,
+        test_id: str | None = None,
+        *,
+        timeline: str | None = None,
+        timeline_error: str | None = None,
+    ) -> str:
         lines = [
             f"simloop: failed at seed {self.seed} "
             f"({self.seeds_passed} seeds passed first)"
@@ -145,6 +162,13 @@ class SeedReport:
             lines.append(
                 f"replay: pytest '{test_id}' --simloop-replay={self.seed}{options}"
             )
+        if timeline is not None:
+            lines.append(f"timeline: {timeline}")
+        elif timeline_error is not None:
+            # The page was asked for and could not be written. That is worth
+            # saying, and worth saying here rather than by raising: the
+            # failure this report describes is the one the user is chasing.
+            lines.append(f"timeline not written: {timeline_error}")
         if self.policy is not None:
             lines.append(_render_policy(self.policy))
         if self.trace_events:
@@ -492,6 +516,7 @@ def _run_seed(
             pending=_pending_tasks(loop),
             divergence=_diff_traces(last_pass, events),
             policy=policy,
+            trace=events,
         )
         choices = loop._choices
     finally:
@@ -583,6 +608,20 @@ def _pending_tasks(loop: SimLoop) -> tuple[PendingTask, ...]:
     return tuple(found)
 
 
+def write_timeline(report: SeedReport, directory: str) -> str:
+    """Draw the failing seed's trace into ``directory``; return the path.
+
+    One page per failing seed, named after it, so that a session that failed
+    several sim tests at several seeds leaves one artifact per failure rather
+    than one that the last failure overwrote.
+    """
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, f"simloop-timeline-seed{report.seed}.html")
+    with open(path, "w", encoding="utf-8") as page:
+        page.write(timeline_html(report.trace))
+    return _short_path(os.path.abspath(path))
+
+
 def _short_path(filename: str) -> str:
     cwd = os.getcwd()
     if filename.startswith(cwd + os.sep):
@@ -595,9 +634,9 @@ class _Overrides:
     """Session state the pytest plugin writes; consulted by sim_test wrappers.
 
     ``seeds``, ``replay``, ``shrink``, ``shrink_budget``, ``jobs``,
-    ``policy`` and ``pct_depth`` mirror the --simloop-* options; ``node_id``
-    is the test currently running, so reports can print an exact replay
-    command. The counters feed the plugin's terminal summary.
+    ``policy``, ``pct_depth`` and ``timeline_dir`` mirror the --simloop-*
+    options; ``node_id`` is the test currently running, so reports can print
+    an exact replay command. The counters feed the plugin's terminal summary.
 
     ``policy`` and ``pct_depth`` are ``None`` when the option was not given,
     the way ``seeds`` is: an option nobody passed must leave a decorator's own
@@ -612,6 +651,7 @@ class _Overrides:
     jobs: int = 1
     policy: str | None = None
     pct_depth: int | None = None
+    timeline_dir: str | None = None
     node_id: str | None = None
     sim_tests: int = 0
     seeds_explored: int = 0
@@ -678,9 +718,10 @@ def sim_test(
     report attached as an exception note. Under pytest, the --simloop-seeds
     and --simloop-replay options override the decorator's arguments,
     --simloop-shrink adds a minimized schedule to the report,
-    --simloop-jobs spreads the seeds over worker processes, and
+    --simloop-jobs spreads the seeds over worker processes,
     --simloop-policy / --simloop-pct-depth override ``policy`` and
-    ``pct_depth``.
+    ``pct_depth``, and --simloop-timeline draws the failing seed's trace to
+    an HTML page named in the report.
     """
     if seeds < 1:
         raise ValueError("seeds must be at least 1")
@@ -724,7 +765,21 @@ def sim_test(
                 overrides.seeds_explored += len(seed_set)
                 return
             overrides.seeds_explored += report.seeds_passed + 1
-            report.exception.add_note(report.render(overrides.node_id))
+            timeline, timeline_error = None, None
+            if overrides.timeline_dir is not None:
+                try:
+                    timeline = write_timeline(report, overrides.timeline_dir)
+                except OSError as unwritable:
+                    # A drawing that cannot be saved must not cost the user
+                    # the report of the failure it was drawing.
+                    timeline_error = str(unwritable)
+            report.exception.add_note(
+                report.render(
+                    overrides.node_id,
+                    timeline=timeline,
+                    timeline_error=timeline_error,
+                )
+            )
             raise report.exception
 
         return wrapper

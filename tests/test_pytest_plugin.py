@@ -292,6 +292,148 @@ def test_pct_refuses_worker_processes(pytester: pytest.Pytester) -> None:
     )
 
 
+_TWO_HOSTS = """
+import asyncio
+from simloop import sim_test
+
+
+async def wait():
+    await asyncio.sleep(0.5)
+
+
+@sim_test(seeds=10)
+async def test_flaky():
+    loop = asyncio.get_running_loop()
+    alpha = loop.net.host("alpha")
+    beta = loop.net.host("beta")
+    await alpha.create_task(wait())
+    await beta.create_task(wait())
+    assert loop.seed != 3
+"""
+
+
+def test_timeline_flag_writes_a_page_for_the_failing_seed(
+    pytester: pytest.Pytester,
+) -> None:
+    pytester.makepyfile(test_demo=_TWO_HOSTS)
+    result = pytester.runpytest_subprocess("--simloop-timeline")
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(["*timeline: *simloop-timeline-seed3.html*"])
+    written = pytester.path / "simloop-timeline-seed3.html"
+    page = written.read_text(encoding="utf-8")
+    assert page.startswith("<!doctype html>")
+    assert 'data-host="alpha"' in page
+
+
+def test_timeline_flag_takes_a_directory(pytester: pytest.Pytester) -> None:
+    pytester.makepyfile(test_demo=_TWO_HOSTS)
+    result = pytester.runpytest_subprocess("--simloop-timeline=artifacts/runs")
+    result.assert_outcomes(failed=1)
+    written = pytester.path / "artifacts" / "runs" / "simloop-timeline-seed3.html"
+    assert written.exists()
+    result.stdout.fnmatch_lines(["*timeline: *artifacts?runs?simloop-timeline-seed3*"])
+
+
+def test_timeline_flag_does_not_swallow_a_test_path(pytester: pytest.Pytester) -> None:
+    # The directory is optional, so argparse would happily read the next
+    # argument as one; a test path is refused rather than quietly running the
+    # whole suite and writing the pages into the test tree.
+    pytester.makepyfile(test_demo=_FLAKY)
+    suite = pytester.path / "suite"
+    suite.mkdir()
+    (suite / "test_inner.py").write_text("def test_ok():\n    pass\n")
+    for swallowed in ("test_demo.py", "suite", "test_demo.py::test_flaky"):
+        result = pytester.runpytest_subprocess("--simloop-timeline", swallowed)
+        assert result.ret != 0, swallowed
+        result.stderr.fnmatch_lines(["*--simloop-timeline=DIR*"])
+
+
+def test_timeline_flag_accepts_a_directory_holding_no_tests(
+    pytester: pytest.Pytester,
+) -> None:
+    # The guard must not refuse the ordinary case: an artifacts directory the
+    # user made earlier, which is a directory and nothing more.
+    pytester.makepyfile(test_demo=_TWO_HOSTS)
+    (pytester.path / "artifacts").mkdir()
+    result = pytester.runpytest_subprocess("--simloop-timeline", "artifacts")
+    result.assert_outcomes(failed=1)
+    assert (pytester.path / "artifacts" / "simloop-timeline-seed3.html").exists()
+
+
+def test_a_timeline_that_cannot_be_written_keeps_the_report(
+    pytester: pytest.Pytester,
+) -> None:
+    # A drawing that cannot be saved must not cost the user the failure it was
+    # drawing: the report still names the seed and the replay command, and the
+    # exception is still the assertion that failed.
+    pytester.makepyfile(test_demo=_TWO_HOSTS)
+    (pytester.path / "blocked").write_text("not a directory\n")
+    result = pytester.runpytest_subprocess("--simloop-timeline=blocked/pages")
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(
+        [
+            "*simloop: failed at seed 3 (3 seeds passed first)*",
+            "*replay: pytest 'test_demo.py::test_flaky' --simloop-replay=3*",
+            "*timeline not written: *blocked*",
+            "*last * trace events:*",
+        ]
+    )
+
+
+def test_no_timeline_without_the_flag(pytester: pytest.Pytester) -> None:
+    pytester.makepyfile(test_demo=_FLAKY)
+    result = pytester.runpytest_subprocess()
+    result.assert_outcomes(failed=1)
+    result.stdout.no_fnmatch_line("*timeline:*")
+    assert not list(pytester.path.glob("simloop-timeline-*.html"))
+
+
+def test_no_timeline_for_a_passing_test(pytester: pytest.Pytester) -> None:
+    pytester.makepyfile(
+        test_demo="""
+import asyncio
+from simloop import sim_test
+
+
+@sim_test(seeds=3)
+async def test_clean():
+    await asyncio.sleep(0.1)
+"""
+    )
+    result = pytester.runpytest_subprocess("--simloop-timeline")
+    result.assert_outcomes(passed=1)
+    assert not list(pytester.path.glob("simloop-timeline-*.html"))
+
+
+def test_timeline_covers_the_whole_run_not_just_the_report_tail(
+    pytester: pytest.Pytester,
+) -> None:
+    # The failure report prints a tail of the trace; the page is the run.
+    pytester.makepyfile(
+        test_demo="""
+import asyncio
+from simloop import sim_test
+
+
+def tick():
+    pass
+
+
+@sim_test(seeds=10, trace_tail=5)
+async def test_flaky():
+    loop = asyncio.get_running_loop()
+    for _ in range(50):
+        loop.call_soon(tick)
+        await asyncio.sleep(0)
+    assert loop.seed != 3
+"""
+    )
+    result = pytester.runpytest_subprocess("--simloop-timeline")
+    result.assert_outcomes(failed=1)
+    page = (pytester.path / "simloop-timeline-seed3.html").read_text(encoding="utf-8")
+    assert page.count('class="dot"') > 50
+
+
 def test_replay_flag_runs_exactly_one_seed(pytester: pytest.Pytester) -> None:
     pytester.makepyfile(test_demo=_FLAKY)
     result = pytester.runpytest_subprocess("--simloop-replay=3")

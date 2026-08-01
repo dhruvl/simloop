@@ -7,6 +7,9 @@ zero-dependency import surface.
 
 from __future__ import annotations
 
+import fnmatch
+import os
+
 import pytest
 
 from simloop import _explore
@@ -63,6 +66,15 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         metavar="N",
         help="ordering constraints PCT aims to hit (--simloop-policy=pct only)",
     )
+    group.addoption(
+        "--simloop-timeline",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="DIR",
+        help="draw each failing seed's trace to an HTML page, in DIR if given "
+        "(as --simloop-timeline=DIR) or where pytest was invoked",
+    )
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -92,8 +104,50 @@ def pytest_configure(config: pytest.Config) -> None:
         )
     _explore.overrides.policy = policy
     _explore.overrides.pct_depth = depth
+    _explore.overrides.timeline_dir = _timeline_dir(config)
     _explore.overrides.sim_tests = 0
     _explore.overrides.seeds_explored = 0
+
+
+def _is_test_path(value: str, config: pytest.Config) -> bool:
+    """Would pytest have collected this argument, had we not eaten it?
+
+    A node id or an existing file is one. A directory is one only if there is
+    something to collect under it — an empty ``artifacts/`` a user made for
+    the pages themselves is a directory and nothing more.
+    """
+    if "::" in value:
+        return True
+    if os.path.isfile(value):
+        return True
+    if not os.path.isdir(value):
+        return False
+    patterns = config.getini("python_files")
+    for _, _, files in os.walk(value):
+        if any(fnmatch.fnmatch(name, pattern) for name in files for pattern in patterns):
+            return True
+    return False
+
+
+def _timeline_dir(config: pytest.Config) -> str | None:
+    """Where failing seeds' timelines go, or ``None`` when nobody asked.
+
+    The directory is optional, which means argparse would otherwise read the
+    next argument as one: ``pytest --simloop-timeline tests/`` would collect
+    nothing it was told to, run the whole suite instead, and drop the pages
+    into the test tree. An argument pytest would have collected is refused.
+    """
+    directory: str | None = config.getoption("--simloop-timeline")
+    if directory is None:
+        return None
+    if directory and _is_test_path(directory, config):
+        raise pytest.UsageError(
+            f"--simloop-timeline wants a directory, and {directory!r} is a "
+            "test path: write the directory as --simloop-timeline=DIR"
+        )
+    # Written where the run was started from, which is where pytest's own
+    # artifacts land and what a relative path in the report is relative to.
+    return directory or str(config.invocation_params.dir)
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:
@@ -104,6 +158,7 @@ def pytest_unconfigure(config: pytest.Config) -> None:
     _explore.overrides.jobs = 1
     _explore.overrides.policy = None
     _explore.overrides.pct_depth = None
+    _explore.overrides.timeline_dir = None
     _explore.overrides.node_id = None
 
 

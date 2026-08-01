@@ -369,6 +369,31 @@ def _report_with(divergence: Divergence) -> SeedReport:
     )
 
 
+def test_report_repr_does_not_dump_the_whole_trace() -> None:
+    # The report is reachable from a failing test's traceback, and it now
+    # carries every event of the failing run for the timeline to draw. A
+    # dataclass repr would print all of them into the terminal.
+    def tick() -> None:
+        pass
+
+    async def churns_at(bad_seed: int) -> None:
+        loop = asyncio.get_running_loop()
+        assert isinstance(loop, simloop.SimLoop)
+        for _ in range(100):
+            loop.call_soon(tick)
+            await asyncio.sleep(0)
+        if loop.seed == bad_seed:
+            raise RuntimeError("boom")
+
+    report = explore(lambda: churns_at(1), range(4), trace_tail=2)
+    assert report is not None
+    assert len(report.trace) > 200
+    text = repr(report)
+    assert len(text) < 1_000
+    assert "trace=" not in text
+    assert "trace_events=" in text
+
+
 def test_sim_test_reraises_with_report_note() -> None:
     @sim_test(seeds=10)
     async def my_test() -> None:
