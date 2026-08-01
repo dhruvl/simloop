@@ -164,6 +164,17 @@ def test_getaddrinfo_honors_type_family_and_proto_filters() -> None:
     assert len(_resolve("server", 80, family=socket.AF_INET)) == 2
 
 
+def test_getaddrinfo_returns_exactly_one_row_per_socket_kind() -> None:
+    # aiohappyeyeballs (aiohttp) and anyio (httpx) both stagger connection
+    # attempts across candidate addresses when more than one comes back,
+    # arming extra timers and racing tasks. Both stay on their simple path
+    # because this resolver returns exactly one row per socket kind. Anyone
+    # making this return more rows must first decide what happy-eyeballs
+    # should mean under simulation.
+    assert len(_resolve("server", 80, type=socket.SOCK_STREAM)) == 1
+    assert len(_resolve("server", 80, type=socket.SOCK_DGRAM)) == 1
+
+
 def test_getaddrinfo_accepts_a_bytes_host_name() -> None:
     # Resolver stacks encode names before resolving them — anyio hands the
     # stdlib resolver ASCII bytes — so bytes must resolve like their text.
