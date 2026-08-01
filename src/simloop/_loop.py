@@ -185,6 +185,18 @@ class SimLoop(asyncio.AbstractEventLoop):
     # ------------------------------------------------------------------
 
     def time(self) -> float:
+        # What the calling task's machine believes the time is. Everything
+        # internal — timer ordering, deadline advance, trace timestamps —
+        # uses the true clock (self._now) directly, so skew never perturbs
+        # scheduling and traces from skewed runs stay comparable.
+        return self._now + self._net._offset_now()
+
+    def _true_time(self) -> float:
+        """The shared virtual clock, the same reading for whoever asks.
+
+        The clock the simulation itself runs on, for the internals that must
+        not see a host's skew — the network's trace timestamps above all.
+        """
         return self._now
 
     def call_soon(
@@ -209,7 +221,14 @@ class SimLoop(asyncio.AbstractEventLoop):
         *args: Unpack[_Ts],
         context: Context | None = None,
     ) -> asyncio.TimerHandle:
-        return self.call_at(self._now + delay, callback, *args, context=context)
+        # A delay is a duration, so it is measured on the true clock and no
+        # caller's offset touches it: a wrong wall clock does not make a
+        # second take longer. Going through call_at instead would subtract
+        # the caller's offset from a deadline that is already true.
+        when = self._now + delay
+        return self._call_at_true(
+            when, when + self._net._offset_now(), callback, args, context
+        )
 
     def call_at(
         self,
@@ -218,8 +237,34 @@ class SimLoop(asyncio.AbstractEventLoop):
         *args: Unpack[_Ts],
         context: Context | None = None,
     ) -> asyncio.TimerHandle:
+        # ``when`` is a reading of the *scheduling* task's clock, so it is
+        # converted to true time once, here, with that task's offset. The
+        # callback runs later under the context asyncio copied into the
+        # handle — the scheduling task's — so it reads the same clock the
+        # scheduler did, which is coherent for the cases that matter:
+        # asyncio.timeout, sleep and protocol timers all schedule from the
+        # task they serve. Nothing re-converts per callback.
+        return self._call_at_true(
+            when - self._net._offset_now(), when, callback, args, context
+        )
+
+    def _call_at_true(
+        self,
+        when: float,
+        shown: float,
+        callback: Callable[[Unpack[_Ts]], object],
+        args: tuple[Unpack[_Ts]],
+        context: Context | None,
+    ) -> asyncio.TimerHandle:
+        """Push a timer whose ``when`` is already true time.
+
+        The heap orders on true time — the one clock the loop itself runs on
+        — while the handle advertises ``shown``, the same deadline on the
+        clock the caller reads, so ``timer.when()`` stays comparable with
+        that task's ``loop.time()``.
+        """
         self._check_closed()
-        timer = asyncio.TimerHandle(when, callback, args, self, context)
+        timer = asyncio.TimerHandle(shown, callback, args, self, context)
         seq = self._next_seq
         self._next_seq += 1
         label = _label(callback)

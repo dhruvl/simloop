@@ -2,7 +2,7 @@
 
 from simloop._explore import SeedReport, explore, sim_test
 from simloop._loop import SimLoop, SimulationDeadlockError, SimulationFenceError
-from simloop._net import Host, SimNetwork
+from simloop._net import Host, SimDisk, SimNetwork
 from simloop._sim import Sim, sim
 from simloop._trace import TraceEvent
 
@@ -12,6 +12,7 @@ __all__ = [
     "Host",
     "SeedReport",
     "Sim",
+    "SimDisk",
     "SimLoop",
     "SimNetwork",
     "SimulationDeadlockError",

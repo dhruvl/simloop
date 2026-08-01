@@ -11,7 +11,7 @@ determinism. Fenced APIs raise `SimulationFenceError` (a subclass of
 | API | Behavior under simulation |
 |---|---|
 | `loop.call_soon` / `call_later` / `call_at` | Seeded ready-queue ordering; `(deadline, seq)` timer tie-break |
-| `loop.time()` / `asyncio.sleep` | Virtual clock starting at 0.0; never waits on wall time |
+| `loop.time()` / `asyncio.sleep` | Virtual clock starting at 0.0; never waits on wall time. What `loop.time()` *reads* is shifted by whatever offset the calling task's host is configured with; durations such as `asyncio.sleep` cost the same everywhere |
 | `loop.create_task` / `asyncio.create_task` | Real stdlib `Task`s, including custom task factories |
 | `loop.create_future` | Real stdlib `Future`s |
 | `run_until_complete` / `run_forever` / `stop` / `close` | Deadlock detection: raises `SimulationDeadlockError` when nothing can run |
@@ -40,6 +40,9 @@ a host belong to an implicit `driver` host.
 | `loop.net.set_defaults` / `set_link` | Per-direction latency ranges, drop and duplication probabilities, drawn from a seed-derived stream |
 | `loop.net.partition` / `heal` | Silent blackhole: datagrams are lost, stream traffic is held and resumes intact after healing; nothing errors — only your own timeouts fire |
 | `loop.net.crash` | A host's tasks are cancelled and it goes silent; no reset is sent — peers cannot tell a crash from a partition |
+| `loop.net.restart` / `host.restart()` | The counterpart to a crash: the host comes back as a fresh incarnation. Liveness is all that is revived — the old tasks stay cancelled, its listeners and binds are gone, and the caller boots whatever should run on the machine again, the same way it booted it the first time. Cancellation is requested at crash and lands on the next scheduler step, so a restart in the same step can briefly coexist with a dying task that swallows `CancelledError`. A packet is checked against liveness when it arrives, so traffic due during the dead window is lost; a packet that was already in flight and lands after the machine is back is delivered, and finds a host that no longer holds the old incarnation's connections. Peers still learn about the outage only from their own timeouts |
+| `host.disk` | Storage that survives the crash: a `MutableMapping` per host, where state a real process would fsync belongs. Writes are atomic at assignment; there is no partial-write model. Values are stored as given, so mutating a stored object afterwards is the caller's own aliasing, exactly as with a cache in front of a real disk |
+| `loop.net.set_clock` / `clock_offset` | Per-host clock skew, in seconds. The offset changes what that host's tasks *read*: `loop.time()` (and `sim.time()` with it) returns true time plus the offset, and a deadline handed to `call_at` is interpreted on the calling task's clock. Durations are immune — `asyncio.sleep`, `asyncio.timeout`, `wait_for` and `call_later` cost the same everywhere, which is exactly what a wrong wall clock does to a real machine. By default the driver and unconfigured hosts read true time; the driver can be given an offset too. Trace timestamps stay on the true clock, so skew never perturbs scheduling and traces from skewed runs stay comparable |
 | `transport.abort()` | Peer gets `connection_lost(ConnectionResetError)` |
 | `loop.getaddrinfo` | Resolves against the host table, never DNS: a registered host name, its synthetic address, or a loopback-shaped name (`None`, `""`, `localhost`, `127.0.0.1`, `0.0.0.0`) meaning the calling task's own host. Returns stdlib-shaped rows — `(AF_INET, SOCK_STREAM, IPPROTO_TCP, "", (address, port))` and the `SOCK_DGRAM` / `IPPROTO_UDP` row — filtered by `family`, `type` and `proto`. Ports are numeric (`int`, a digit string, or `None` for 0); resolver `flags` have nothing to vary |
 | `loop.getnameinfo` | Reverse lookup: a synthetic address maps back to its host name, and a host name (what `get_extra_info("peername")` reports) maps to itself. `NI_NUMERICHOST` returns the address instead; services are always numeric |
@@ -53,6 +56,17 @@ Anything the host table cannot answer — an unknown name, an unassigned
 address, an `AF_INET6` or `SOCK_RAW` request, a service name — raises
 `socket.gaierror(EAI_NONAME)`. Resolution is a pure lookup, not a scheduling
 decision: it never blocks and records no trace event.
+
+Partitions, crashes and reboots are all silent, so time is the only
+failure detector the code under test has — and `set_clock` lets that
+detector be wrong. A lease holder whose clock runs fast and an issuer
+whose clock runs slow disagree about when the lease expired, which is the
+disagreement leases exist to survive, and a test can produce it on
+purpose. The converse is worth knowing before reaching for it: a protocol
+that puts durations on the wire rather than timestamps is immune to skew
+by construction — in `examples/jobqueue/` only the broker reads a clock,
+so skewing a worker changes nothing the cluster decides. Clock faults
+reach only code that compares timestamps taken on different machines.
 
 Limitations, stated honestly: write-side flow control is not simulated
 (`drain()` never blocks, write buffers are unbounded, the peer cannot pause
