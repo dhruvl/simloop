@@ -46,11 +46,12 @@ carries a date instead.
 | anyio | 4.14.2 | works: task group, memory object stream (one, two, three), anyio.sleep and move_on_after; virtual clock reached 1.75s | Asyncio backend only; nothing here touches a socket. |
 | redis (RESP wire protocol) | n/a | works: PING, SET and GET round trips over one connection: ['+PONG', '+OK', '0'] | Hand-rolled RESP over sim streams; no client library, no real server. |
 | websockets | 17.0.1 | works: handshake, one echoed frame ('HELLO') and close over ws:// | asyncio server and client on two sim hosts, ws:// only. |
-| aiohttp (client) | 3.14.3 | fenced: simloop does not simulate 'sock_connect'; see docs/supported-api.md for the supported asyncio subset | ClientSession GET at a sim host answered by a raw stream server. |
-| httpx | 0.28.1 | fails: AttributeError: 'NoneType' object has no attribute 'getpeername' | AsyncClient GET at a sim host answered by a raw stream server. |
+| aiohttp (client) | 3.14.3 | works: ClientSession GET returned 'hello from the simulation' | ClientSession GET at a sim host answered by a raw stream server. |
+| httpx | 0.28.1 | works: AsyncClient GET returned 'hello from the simulation' | AsyncClient GET at a sim host answered by a raw stream server. |
 
-Rows are grouped: the libraries expected to run on the loop first, then the
-client stacks expected to leave it.
+Rows are grouped: the libraries that need nothing but the loop and its
+streams first, then the client stacks that expect a socket object
+underneath them.
 
 ## Reading the rows
 
@@ -78,37 +79,67 @@ clients are built on — a length-prefixed request/response protocol on one
 long-lived connection — so the probe speaks RESP by hand against a small
 server on a second sim host, and the row claims no more than that.
 
-**aiohttp's client** leaves the simulation at its first connection attempt.
-The fence, verbatim:
+**aiohttp's client** issues its GET and reads the body back. Its connector
+resolves the name through `loop.getaddrinfo`, then hands the addresses to
+`aiohappyeyeballs`, which creates a real `AF_INET` stream socket, calls
+`loop.sock_connect` on it, and passes that socket to
+`loop.create_connection(sock=...)`. The simulation answers the sequence
+without letting the socket reach a network: `sock_connect` resolves the
+target against the host table and records it, moving no packet and no
+clock, and the `create_connection` call closes the real descriptor and
+opens a simulated connection to the recorded address, paying the same
+single round trip a direct `create_connection` would. The connector's
+`setsockopt(TCP_NODELAY)` lands on the stand-in object
+`get_extra_info("socket")` returns, which accepts option calls and does
+nothing with them.
+
+**httpx** completes the same request through httpcore and anyio. anyio
+resolves the name (the simulated resolver accepts the ASCII-encoded form
+anyio sends) and connects through `loop.create_connection`, with no socket
+of its own. The step that used to end this row comes next: httpcore asks
+the new stream who it is connected to, and anyio answers by reading the
+socket object out of `transport.get_extra_info("socket")`
+(`anyio/abc/_sockets.py`, `extra_attributes`) and calling `getpeername()`
+on it. A transport with no operating-system socket now answers with a
+stand-in that reports the peer's synthetic address and port, so the
+introspection succeeds and the response body comes back.
+
+Both client probes make one request against a responder that sends
+`Connection: close`, so neither row says anything about connection reuse.
+The piece a pool depends on is the descriptor `fileno()` returns: httpcore
+polls it to decide whether a pooled connection has died, and the
+simulation backs it with a parked descriptor the transport owns, which
+stays unreadable while the peer is alive and becomes readable once the
+peer's EOF arrives; a reset or a teardown closes it and `fileno()` returns
+`-1`, which the same poll reads as dead just as well. That contract is
+pinned by the test suite, not by these rows.
+
+Both client rows are `http://` only, and the two stacks stop differently
+on `https://`. aiohttp asks for TLS through `create_connection(ssl=...)`,
+which fences:
 
 ```
-simloop does not simulate 'sock_connect'; see docs/supported-api.md for the supported asyncio subset
+simloop does not simulate 'create_connection(ssl=...)'; see docs/supported-api.md for the supported asyncio subset
 ```
 
-Its connector resolves the name through `loop.getaddrinfo` (which the
-simulation answers), then hands the addresses to `aiohappyeyeballs`, which
-opens a real socket and calls `loop.sock_connect` on it. Raw sockets are
-fenced, so the simulation stops there rather than letting a real connection
-out.
-
-**httpx** never reaches a fence, and gets further than its verdict looks.
-It goes through httpcore and anyio; anyio resolves the name (the simulated
-resolver accepts the ASCII-encoded form anyio sends), connects through
-`loop.create_connection`, and the connection *succeeds*. The failure is
-introspection after the fact: httpcore asks the new stream for its local
-and remote addresses, anyio answers by reading the raw socket object out of
-`transport.get_extra_info("socket")` (`anyio/abc/_sockets.py`,
-`extra_attributes`), and the simulation's honest answer for a transport
-with no operating-system socket is `None`. Whether a request would complete
-past that line is untested here.
+httpx reaches no fence. httpcore wraps the byte stream with anyio's
+`TLSStream`, which drives an `ssl` memory BIO inside the process and
+sends the handshake as ordinary bytes over the simulated connection, so
+`loop.start_tls` is never called and nothing stops the attempt. Where it
+ends is up to whatever is listening: aimed at the plaintext responder
+these probes use, the handshake goes unanswered and the request dies of
+httpx's own `ConnectTimeout`. That timeout is a one-off measurement
+rather than a row — no probe on this page requests `https://`.
 
 ## Not tested
 
 - **asyncpg**: reaching its first fence needs a live PostgreSQL server to
   connect to, which no probe can provide; it is untested rather than
   fenced-or-not.
-- **TLS anywhere**: `start_tls` is fenced, so `https://` and `wss://` are out
-  of scope for every probe on this page.
+- **TLS anywhere**: no probe on this page requests `https://` or `wss://`.
+  simloop fences `start_tls` and `create_connection(ssl=...)`, but a stack
+  that runs its handshake in memory reaches neither — it reaches a simulated
+  network with nothing on it that speaks TLS unless the test puts it there.
 - Anything that reaches outside the loop by design — threads, executors,
   subprocesses, signals, real DNS. Those are fences, listed in
   [docs/supported-api.md](supported-api.md), not compatibility questions.

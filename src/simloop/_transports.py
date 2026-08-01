@@ -9,6 +9,7 @@ packet movement is delegated to the owning ``SimNetwork``.
 from __future__ import annotations
 
 import asyncio
+import socket
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -89,6 +90,79 @@ class _SimDatagramTransport(asyncio.DatagramTransport):
         return self._protocol
 
 
+class _SimSocket:
+    """Stand-in for the OS socket a simulated stream connection does not have.
+
+    Client stacks introspect the transport's socket: anyio eagerly calls
+    getpeername()/.family on every typed-attribute lookup, aiohttp sets
+    TCP_NODELAY through it, and httpcore polls fileno() to decide whether a
+    pooled connection died. Addresses are reported as synthetic-IP tuples so
+    callers that feed them to ipaddress.ip_address() get a plausible
+    AF_INET sockaddr; option and teardown calls are accepted and do nothing.
+    Anything not listed here raises AttributeError, keeping the simulation
+    loud about surface it does not fake.
+    """
+
+    def __init__(self, transport: _SimStreamTransport) -> None:
+        self._transport = transport
+        self.family = socket.AF_INET
+        self.type = socket.SOCK_STREAM
+        self.proto = socket.IPPROTO_TCP
+        self._park: tuple[socket.socket, socket.socket] | None = None
+        self._disposed = False
+
+    def _address(self, endpoint: _Addr) -> tuple[str, int]:
+        name, port = endpoint
+        return (self._transport._net.address(name), port)
+
+    def getsockname(self) -> tuple[str, int]:
+        return self._address(self._transport._local)
+
+    def getpeername(self) -> tuple[str, int]:
+        return self._address(self._transport._remote)
+
+    def setsockopt(self, *args: Any) -> None:
+        return None
+
+    def shutdown(self, how: int) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+    def fileno(self) -> int:
+        # httpcore's is_socket_readable() polls this fd to decide whether a
+        # pooled connection died. A parked socketpair end reads not-readable
+        # until its peer end is closed, so the poll answers exactly one
+        # question: has the peer's EOF arrived? A reset or a teardown closes
+        # both ends instead and reports -1, which the same poll reads as dead
+        # just as a closed real socket would. Lazy: connections nobody
+        # introspects cost no descriptors, which matters at campaign scale.
+        if self._disposed:
+            return -1
+        if self._park is None:
+            self._park = socket.socketpair()
+            # The peer's FIN/RST can land before anyone asks for the socket,
+            # so a freshly parked pair inherits whatever the transport
+            # already saw rather than claiming a dead connection is live.
+            if self._transport._peer_closed:
+                self._park[0].close()
+        return self._park[1].fileno()
+
+    def _peer_gone(self) -> None:
+        # The peer's EOF arrived: closing the held end makes the exposed end
+        # poll readable, exactly when a real kernel would report it.
+        if self._park is not None:
+            self._park[0].close()
+
+    def _dispose(self) -> None:
+        self._disposed = True
+        if self._park is not None:
+            self._park[0].close()
+            self._park[1].close()
+            self._park = None
+
+
 class _SimStreamTransport(asyncio.Transport):
     """One end of a reliable, ordered byte-stream connection.
 
@@ -116,6 +190,8 @@ class _SimStreamTransport(asyncio.Transport):
         self._backlog: list[bytes] = []
         self._eof_pending = False
         self._limits = (16 * 1024, 64 * 1024)  # (low, high): recorded, inert
+        self._extra_socket: _SimSocket | None = None
+        self._peer_closed = False  # the peer's FIN or RST has arrived
 
     def _begin(self, protocol: Any) -> None:
         self._protocol = protocol
@@ -179,6 +255,8 @@ class _SimStreamTransport(asyncio.Transport):
         self._closed = True
         self._closing = True
         self._net._drop_stream(self._conn, self._local[0])
+        if self._extra_socket is not None:
+            self._extra_socket._dispose()
         protocol, self._protocol = self._protocol, None
         if protocol is not None:
             protocol.connection_lost(exc)
@@ -196,6 +274,9 @@ class _SimStreamTransport(asyncio.Transport):
         self._protocol.data_received(data)
 
     def _eof_arrived(self) -> None:
+        self._peer_closed = True
+        if self._extra_socket is not None:
+            self._extra_socket._peer_gone()
         if self._closed:
             return
         if self._read_paused:
@@ -206,6 +287,11 @@ class _SimStreamTransport(asyncio.Transport):
             self.close()
 
     def _reset_arrived(self) -> None:
+        # No _peer_gone() here: a reset tears the connection down on the spot,
+        # and _finish closes both parked ends. The descriptor goes to -1
+        # rather than turning readable, which a liveness poll reads the same
+        # way — as a connection to discard.
+        self._peer_closed = True
         if self._closed:
             return
         self._finish(ConnectionResetError("Connection reset by peer"))
@@ -244,6 +330,15 @@ class _SimStreamTransport(asyncio.Transport):
             return self._local
         if name == "peername":
             return self._remote
+        if name == "socket":
+            if self._extra_socket is None:
+                self._extra_socket = _SimSocket(self)
+                if self._closed:
+                    # Asked for after teardown: born closed, like the socket a
+                    # finished connection leaves behind. Nothing here may hand
+                    # out a live descriptor for a connection that is gone.
+                    self._extra_socket._dispose()
+            return self._extra_socket
         return default
 
     def set_protocol(self, protocol: Any) -> None:
