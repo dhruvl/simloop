@@ -345,7 +345,13 @@ def test_timeline_flag_does_not_swallow_a_test_path(pytester: pytest.Pytester) -
     for swallowed in ("test_demo.py", "suite", "test_demo.py::test_flaky"):
         result = pytester.runpytest_subprocess("--simloop-timeline", swallowed)
         assert result.ret != 0, swallowed
-        result.stderr.fnmatch_lines(["*--simloop-timeline=DIR*"])
+        result.stderr.fnmatch_lines(["*--simloop-timeline with no value*"])
+    # The two spellings are one string by the time the guard sees them, so the
+    # = form is refused too — which is why the message names the ways out
+    # instead of telling the user to write the = form.
+    result = pytester.runpytest_subprocess("--simloop-timeline=suite")
+    assert result.ret != 0
+    result.stderr.fnmatch_lines(["*--simloop-timeline with no value*"])
 
 
 def test_timeline_flag_accepts_a_directory_holding_no_tests(

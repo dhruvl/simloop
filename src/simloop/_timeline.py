@@ -38,11 +38,16 @@ _FATES = frozenset({"drop", "lost", "hold"})
 # mark; everything else that marks a lane is a packet's small misfortune, and
 # a run that drops a thousand datagrams must not look like a thousand crashes.
 _MACHINE_FATES = frozenset({"crash", "restart"})
-# A packet is only ever "lost" where it was going: the network records it when
-# a packet reaches a machine that is gone or that has nothing bound to take it
-# (SimNetwork._deliver, SimNetwork.crash). Every other fate — dropped at
-# transmission, held by a standing cut, duplicated, released — happens at the
-# sending end, so it marks the sender's lane.
+# "lost" marks the destination's lane. Two of the three places it is recorded
+# earn that: a packet reaching a machine that is gone, and one reaching a port
+# with nothing bound (both SimNetwork._deliver). The third does not — when a
+# host crashes it sweeps the packets a standing cut was holding and records
+# "lost" for every one where the crashed host is *either* end, so a crashed
+# sender's held packets are charged to the lane they were addressed to rather
+# than to the machine that died. The mark still lands on a lane the packet
+# concerned, and the label carries "src>dst" either way. Every other fate —
+# dropped at transmission, held by a standing cut, duplicated, released —
+# happens at the sending end, so it marks the sender's lane.
 _ARRIVAL_FATES = frozenset({"lost"})
 
 # Layout, in user units of the SVG viewBox. The page is zoomable, so these

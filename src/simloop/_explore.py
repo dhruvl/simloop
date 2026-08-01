@@ -132,7 +132,9 @@ class SeedReport:
 
     ``trace`` stays out of the repr: it can hold tens of thousands of events,
     and this object is reachable from a failing test's traceback, where a
-    dataclass repr would print the whole run into the terminal.
+    dataclass repr would print the whole run into the terminal. It is held
+    whether or not a timeline was asked for, so the memory is the failing
+    run's full event list either way.
     """
 
     seed: int

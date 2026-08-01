@@ -136,6 +136,9 @@ def _timeline_dir(config: pytest.Config) -> str | None:
     next argument as one: ``pytest --simloop-timeline tests/`` would collect
     nothing it was told to, run the whole suite instead, and drop the pages
     into the test tree. An argument pytest would have collected is refused.
+    By the time the value reaches here the two spellings are the same string,
+    so ``--simloop-timeline=tests`` is refused as well; the message names the
+    ways out rather than a syntax the user may already be using.
     """
     directory: str | None = config.getoption("--simloop-timeline")
     if directory is None:
@@ -143,7 +146,10 @@ def _timeline_dir(config: pytest.Config) -> str | None:
     if directory and _is_test_path(directory, config):
         raise pytest.UsageError(
             f"--simloop-timeline wants a directory, and {directory!r} is a "
-            "test path: write the directory as --simloop-timeline=DIR"
+            "test path pytest would have collected: pass "
+            "--simloop-timeline with no value to write the pages where "
+            "pytest was invoked, or name a directory that is not also a "
+            "test path"
         )
     # Written where the run was started from, which is where pytest's own
     # artifacts land and what a relative path in the report is relative to.

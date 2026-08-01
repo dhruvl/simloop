@@ -4,9 +4,9 @@ Three numbers matter for a simulation harness: what the simulated loop costs
 per scheduling step, how much simulated time it covers per wall-clock second,
 and how fast the explorer burns through seeds on a real test. Measured on a
 MacBook Air (Apple M4, 16 GB), macOS, CPython 3.12.13. Every number is the
-median of at least 5 runs after one warmup run, on an otherwise idle
-machine. Rerun
-them with the commands below; expect the ratios, not the absolute times, to
+median of at least 5 runs after one warmup run, with the machine as idle as
+a developer laptop gets. Rerun them with the commands below; expect the
+ratios, not the absolute times, to
 transfer to other machines.
 
 ## Scheduling overhead
@@ -73,8 +73,9 @@ simulated seconds and checks every invariant. 300 seeds complete in
 in one process. A thousand-seed overnight search is a 19-second coffee
 break.
 
-That is slower than the ~59 seeds/second published for 0.1.0, and the cost
-is a feature: 0.2.0 records a trace event for every packet delivery, not
+That is slower than the ~55 seeds/second (5.4–6.0 s) published for 0.1.0,
+and the cost is a feature: 0.2.0 records a trace event for every packet
+delivery, not
 just for every send, which is what lets a timeline draw both ends of a
 crossing — and a scenario this network-heavy pays for the extra events
 directly. The wire is where this benchmark spends its time, which is why

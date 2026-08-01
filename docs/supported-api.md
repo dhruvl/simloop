@@ -123,7 +123,8 @@ crossing pair up. The other verbs are usually what happened instead: `drop` (a
 lossy link, or a datagram meeting a partition), `hold` and `release` (a stream
 packet parked by a partition, then put back on the wire when it heals), `dup`
 (a duplicate on its way as well, under the same uid), and `lost` (it reached a
-machine that was gone, or a port with nothing bound). "Usually", because the
+machine that was gone, a port with nothing bound, or it was a held packet
+whose own sender crashed). "Usually", because the
 second kind of loss follows a `deliver` rather than replacing it: the packet
 did reach the machine, and only then found nothing to take it. `crash` and
 `restart` name a machine instead of a link.
