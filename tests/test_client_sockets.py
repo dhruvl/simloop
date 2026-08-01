@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from simloop import SimLoop
+from simloop import SimLoop, SimulationFenceError
 
 
 def _network(seed: int = 0) -> SimLoop:
@@ -199,4 +199,66 @@ def test_fileno_after_teardown_never_creates_a_descriptor() -> None:
     assert sock.fileno() == -1
     assert sock._park is None
     server.close()
+    loop.close()
+
+
+def test_sock_connect_records_a_stream_socket_target() -> None:
+    loop = _network()
+
+    async def main() -> None:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setblocking(False)  # what aiohappyeyeballs does
+        try:
+            await loop.sock_connect(sock, (loop.net.address("server"), 9000))
+            assert loop._sock_targets[sock] == (loop.net.address("server"), 9000)
+        finally:
+            sock.close()
+
+    loop.run_until_complete(main())
+    loop.close()
+
+
+def test_sock_connect_rejects_unknown_addresses() -> None:
+    loop = _network()
+
+    async def main() -> None:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            with pytest.raises(OSError, match="10.9.9.9"):
+                await loop.sock_connect(sock, ("10.9.9.9", 9000))
+        finally:
+            sock.close()
+
+    loop.run_until_complete(main())
+    loop.close()
+
+
+def test_sock_connect_still_fences_datagram_sockets() -> None:
+    loop = _network()
+
+    async def main() -> None:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            with pytest.raises(SimulationFenceError):
+                await loop.sock_connect(sock, (loop.net.address("server"), 9000))
+        finally:
+            sock.close()
+
+    loop.run_until_complete(main())
+    loop.close()
+
+
+def test_sock_connect_consumes_no_virtual_time() -> None:
+    loop = _network()
+
+    async def main() -> float:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            before = loop.time()
+            await loop.sock_connect(sock, ("server", 9000))
+            return loop.time() - before
+        finally:
+            sock.close()
+
+    assert loop.run_until_complete(main()) == 0.0
     loop.close()

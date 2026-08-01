@@ -6,6 +6,7 @@ import asyncio
 import gc
 import heapq
 import random
+import socket
 import sys
 from array import array
 from asyncio import events
@@ -117,6 +118,10 @@ class SimLoop(asyncio.AbstractEventLoop):
         self._unhandled: list[BaseException] = []
         self._exception_handler: _ExceptionHandler | None = None
         self._task_factory: _TaskFactory | None = None
+        # sock_connect(sock, addr) -> create_connection(sock=sock) is how
+        # aiohttp reaches the network; the address is only visible in the
+        # first call, so it is parked here until the upgrade claims it.
+        self._sock_targets: dict[Any, tuple[Any, int]] = {}
         self._net = SimNetwork(self)
 
     @classmethod
@@ -328,6 +333,7 @@ class SimLoop(asyncio.AbstractEventLoop):
     def close(self) -> None:
         if self._running:
             raise RuntimeError("cannot close a running event loop")
+        self._sock_targets.clear()
         self._closed = True
 
     def _check_closed(self) -> None:
@@ -585,8 +591,21 @@ class SimLoop(asyncio.AbstractEventLoop):
     def sock_sendall(self, *args: Any, **kwargs: Any) -> Any:
         _fence("sock_sendall")
 
-    def sock_connect(self, *args: Any, **kwargs: Any) -> Any:
-        _fence("sock_connect")
+    async def sock_connect(self, sock: Any, address: Any) -> None:
+        # aiohttp's connector creates a real TCP socket and connects it here
+        # before handing it to create_connection(sock=...). The simulation
+        # accepts exactly that shape; every other socket kind still fences.
+        if (
+            getattr(sock, "family", None) != socket.AF_INET
+            or getattr(sock, "type", None) != socket.SOCK_STREAM
+        ):
+            _fence("sock_connect (only AF_INET stream sockets are simulated)")
+        host, port = address[0], address[1]
+        self._net._resolve(host)  # unknown targets fail here, loudly
+        # No packet moves and no time passes yet: the connection handshake
+        # (and its one-RTT cost) happens when create_connection claims the
+        # socket, keeping the total cost identical to a direct connect.
+        self._sock_targets[sock] = (host, port)
 
     def sock_accept(self, *args: Any, **kwargs: Any) -> Any:
         _fence("sock_accept")
