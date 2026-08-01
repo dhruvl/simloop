@@ -9,6 +9,7 @@ packet movement is delegated to the owning ``SimNetwork``.
 from __future__ import annotations
 
 import asyncio
+import socket
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -89,6 +90,45 @@ class _SimDatagramTransport(asyncio.DatagramTransport):
         return self._protocol
 
 
+class _SimSocket:
+    """Stand-in for the OS socket a simulated stream connection does not have.
+
+    Client stacks introspect the transport's socket: anyio eagerly calls
+    getpeername()/.family on every typed-attribute lookup, aiohttp sets
+    TCP_NODELAY through it, and httpcore polls fileno() to decide whether a
+    pooled connection died. Addresses are reported as synthetic-IP tuples so
+    callers that feed them to ipaddress.ip_address() get a plausible
+    AF_INET sockaddr; option and teardown calls are accepted and do nothing.
+    Anything not listed here raises AttributeError, keeping the simulation
+    loud about surface it does not fake.
+    """
+
+    def __init__(self, transport: _SimStreamTransport) -> None:
+        self._transport = transport
+        self.family = socket.AF_INET
+        self.type = socket.SOCK_STREAM
+        self.proto = socket.IPPROTO_TCP
+
+    def _address(self, endpoint: _Addr) -> tuple[str, int]:
+        name, port = endpoint
+        return (self._transport._net.address(name), port)
+
+    def getsockname(self) -> tuple[str, int]:
+        return self._address(self._transport._local)
+
+    def getpeername(self) -> tuple[str, int]:
+        return self._address(self._transport._remote)
+
+    def setsockopt(self, *args: Any) -> None:
+        return None
+
+    def shutdown(self, how: int) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
 class _SimStreamTransport(asyncio.Transport):
     """One end of a reliable, ordered byte-stream connection.
 
@@ -116,6 +156,7 @@ class _SimStreamTransport(asyncio.Transport):
         self._backlog: list[bytes] = []
         self._eof_pending = False
         self._limits = (16 * 1024, 64 * 1024)  # (low, high): recorded, inert
+        self._extra_socket: _SimSocket | None = None
 
     def _begin(self, protocol: Any) -> None:
         self._protocol = protocol
@@ -244,6 +285,10 @@ class _SimStreamTransport(asyncio.Transport):
             return self._local
         if name == "peername":
             return self._remote
+        if name == "socket":
+            if self._extra_socket is None:
+                self._extra_socket = _SimSocket(self)
+            return self._extra_socket
         return default
 
     def set_protocol(self, protocol: Any) -> None:
