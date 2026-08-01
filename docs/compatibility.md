@@ -113,18 +113,32 @@ stays unreadable while the peer is alive and becomes readable once the
 peer's EOF or reset arrives. That contract is pinned by the test suite,
 not by these rows.
 
-TLS is where both clients still stop. The two rows are `http://` only: a
-request to an `https://` URL fences before the handshake starts, whether
-the stack asks for it through `start_tls` or through
-`create_connection(ssl=...)`.
+Both client rows are `http://` only, and the two stacks stop differently
+on `https://`. aiohttp asks for TLS through `create_connection(ssl=...)`,
+which fences:
+
+```
+simloop does not simulate 'create_connection(ssl=...)'; see docs/supported-api.md for the supported asyncio subset
+```
+
+httpx reaches no fence. httpcore wraps the byte stream with anyio's
+`TLSStream`, which drives an `ssl` memory BIO inside the process and
+sends the handshake as ordinary bytes over the simulated connection, so
+`loop.start_tls` is never called and nothing stops the attempt. Where it
+ends is up to whatever is listening: aimed at the plaintext responder
+these probes use, the handshake goes unanswered and the request dies of
+httpx's own `ConnectTimeout`. That is a one-off measurement rather than a
+row — no probe on this page requests `https://`.
 
 ## Not tested
 
 - **asyncpg**: reaching its first fence needs a live PostgreSQL server to
   connect to, which no probe can provide; it is untested rather than
   fenced-or-not.
-- **TLS anywhere**: `start_tls` is fenced, so `https://` and `wss://` are out
-  of scope for every probe on this page.
+- **TLS anywhere**: no probe on this page requests `https://` or `wss://`.
+  simloop fences `start_tls` and `create_connection(ssl=...)`, but a stack
+  that runs its handshake in memory reaches neither — it reaches a simulated
+  network with nothing on it that speaks TLS.
 - Anything that reaches outside the loop by design — threads, executors,
   subprocesses, signals, real DNS. Those are fences, listed in
   [docs/supported-api.md](supported-api.md), not compatibility questions.
