@@ -11,16 +11,14 @@ from simloop import sim, sim_test
 import harness
 
 
-@pytest.mark.slow
-@sim_test(seeds=300)
-async def test_chaos_campaign_holds_the_invariants() -> None:
+async def _campaign(*, disks: bool) -> None:
     rng = sim.random
     loop = harness.sim_loop()
-    cluster = await harness.start_cluster(size=5)
+    cluster = await harness.start_cluster(size=5, disks=disks)
     loop.net.set_defaults(latency=(0.01, 0.05), drop=0.02, duplicate=0.02)
     for i in range(2):
         await harness.propose(cluster, f"before.{i}")
-    disorder = loop.create_task(harness.chaos(cluster, rng))
+    disorder = loop.create_task(harness.chaos(cluster, rng, power_cuts=disks))
     sent = 0
     while not disorder.done():
         await harness.propose(cluster, f"during.{sent}", timeout_s=120.0)
@@ -31,3 +29,22 @@ async def test_chaos_campaign_holds_the_invariants() -> None:
     await harness.propose(cluster, "after", timeout_s=120.0)
     await harness.settle(cluster)
     harness.verify(cluster)
+
+
+@pytest.mark.slow
+@sim_test(seeds=300)
+async def test_chaos_campaign_holds_the_invariants() -> None:
+    await _campaign(disks=False)
+
+
+@pytest.mark.slow
+@sim_test(seeds=300)
+async def test_the_campaign_holds_on_disks_that_lose_power() -> None:
+    """The same chaos, with the state on buffered disks and hard crashes.
+
+    Every restart here is a power cut: the machine dies with whatever it had
+    not synced, and a seeded prefix of that is all its reboot can find. The
+    node syncs before every reply it makes, which is exactly the discipline
+    this campaign is holding to account.
+    """
+    await _campaign(disks=True)

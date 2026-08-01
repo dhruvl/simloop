@@ -100,6 +100,46 @@ def test_skipped_persistence_forgets_committed_entries() -> None:
     )
 
 
+async def unsynced_ack(*, sync_before_ack: bool) -> None:
+    """A committed entry that only ever reached the followers' write buffers.
+
+    The leader counts an ack it should not have been given yet, commits,
+    and applies. Cutting the power to the followers behind a partition
+    takes the entry with it, and the term they elect next has no idea it
+    was ever committed.
+    """
+    cluster = await harness.start_cluster(
+        safeguards=Safeguards(sync_before_ack=sync_before_ack), disks=True
+    )
+    loop = harness.sim_loop()
+    leader = await harness.wait_for_leader(cluster)
+    await harness.propose(cluster, "k0")
+    rest = [name for name in cluster.names if name != leader]
+    loop.net.partition([leader], rest)
+    for name in rest:
+        await harness.power_cut(cluster, name)
+    await asyncio.sleep(4.0)
+    harness.verify(cluster)
+
+
+def test_an_unsynced_ack_loses_a_committed_entry() -> None:
+    report = _find(lambda: unsynced_ack(sync_before_ack=False))
+    assert isinstance(report.exception, InvariantViolation)
+    assert report.exception.invariant in (
+        "leader-completeness", "state-machine-safety",
+    )
+
+
+@pytest.mark.slow
+def test_the_synced_ack_carries_the_same_scenario() -> None:
+    """The other half of the row above: put the sync back and it holds.
+
+    Same power cuts on the same disks -- the only difference is that the
+    entries were on them before the acks went out.
+    """
+    assert explore(lambda: unsynced_ack(sync_before_ack=True), range(150)) is None
+
+
 def test_accepting_stale_terms_rewrites_history() -> None:
     async def scenario() -> None:
         cluster = await harness.start_cluster(

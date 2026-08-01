@@ -11,7 +11,7 @@ from simloop import SimLoop, sim
 
 from raft import wire
 from raft.node import LEADER, PORT, Event, RaftNode, Safeguards
-from raft.storage import Entry, MemoryStorage
+from raft.storage import DiskStorage, Entry, MemoryStorage, Storage
 
 from checks import check_invariants
 
@@ -25,7 +25,7 @@ def sim_loop() -> SimLoop:
 @dataclass
 class Member:
     name: str
-    storage: MemoryStorage
+    storage: Storage
     node: RaftNode
     task: asyncio.Task[Any]
 
@@ -42,8 +42,15 @@ class Cluster:
 
 
 async def start_cluster(
-    *, size: int = 3, safeguards: Safeguards | None = None
+    *, size: int = 3, safeguards: Safeguards | None = None, disks: bool = False
 ) -> Cluster:
+    """Boot a cluster; ``disks`` puts its state on host disks that lose power.
+
+    With disks on, each node keeps its record on `host.disk` configured
+    buffered and torn: a write is only durable once the node syncs it, and a
+    crash keeps a seeded prefix of whatever it was still holding. Off, the
+    state sits in a stand-in that is durable the moment it is written.
+    """
     loop = sim_loop()
     loop.net.set_defaults(latency=(0.01, 0.05))
     cluster = Cluster(
@@ -53,12 +60,19 @@ async def start_cluster(
         safeguards=safeguards if safeguards is not None else Safeguards(),
     )
     for name in cluster.names:
-        _boot(cluster, name, MemoryStorage())
+        storage: Storage
+        if disks:
+            host = loop.net.host(name)
+            loop.net.set_disk(name, buffered=True, torn=True)
+            storage = DiskStorage(host.disk)
+        else:
+            storage = MemoryStorage()
+        _boot(cluster, name, storage)
     await asyncio.sleep(0.05)  # let the servers start listening
     return cluster
 
 
-def _boot(cluster: Cluster, name: str, storage: MemoryStorage) -> None:
+def _boot(cluster: Cluster, name: str, storage: Storage) -> None:
     loop = sim_loop()
     node = RaftNode(
         name,
@@ -83,11 +97,33 @@ async def restart(cluster: Cluster, name: str) -> None:
     _boot(cluster, name, member.storage)
 
 
-async def chaos(cluster: Cluster, rng: random.Random) -> None:
+async def power_cut(cluster: Cluster, name: str) -> None:
+    """The machine dies where it stands, then boots from whatever the disk kept.
+
+    Unlike ``restart``, the host itself goes down: a buffered disk loses the
+    writes it had not synced, so the incarnation that boots here can be
+    missing something the old one already told its peers.
+    """
+    loop = sim_loop()
+    member = cluster.members[name]
+    loop.net.crash(name)
+    try:
+        await member.task
+    except asyncio.CancelledError:
+        pass
+    loop.net.restart(name)
+    _boot(cluster, name, member.storage)
+
+
+async def chaos(
+    cluster: Cluster, rng: random.Random, *, power_cuts: bool = False
+) -> None:
     """A seed-derived fault schedule: partition windows and process restarts.
 
     Cut sizes never exceed half the cluster, so a quorum side always exists
     and the driver -- which is never partitioned -- can keep proposing.
+    ``power_cuts`` makes those restarts hard ones, which is only a different
+    fault if the cluster's disks buffer.
     """
     loop = sim_loop()
     for _ in range(3):
@@ -98,7 +134,11 @@ async def chaos(cluster: Cluster, rng: random.Random) -> None:
         await asyncio.sleep(rng.uniform(0.5, 3.0))
         loop.net.heal()
         if rng.random() < 0.5:
-            await restart(cluster, rng.choice(cluster.names))
+            victim = rng.choice(cluster.names)
+            if power_cuts:
+                await power_cut(cluster, victim)
+            else:
+                await restart(cluster, victim)
 
 
 def leader_now(cluster: Cluster) -> str | None:

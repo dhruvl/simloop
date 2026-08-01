@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import random
 
+from simloop import SimLoop
+
 from raft.node import CANDIDATE, FOLLOWER, RaftNode, Safeguards
-from raft.storage import Entry, MemoryStorage, PersistentState
+from raft.storage import DiskStorage, Entry, MemoryStorage, PersistentState
 
 
 def make_node(
@@ -94,6 +96,47 @@ def test_without_the_vote_ledger_it_grants_everyone() -> None:
 def test_without_the_freshness_check_a_stale_log_wins_votes() -> None:
     node = make_node(log=[Entry(1, "a")], safeguards=Safeguards(check_log_up_to_date=False))
     assert ask(node, term=2, last_index=0, last_term=0)["granted"] is True
+
+
+def _voted_twice_across_a_power_cut(*, sync_before_vote: bool) -> bool:
+    """Grant a vote, cut the power, and ask the machine again in the same term.
+
+    The disk buffers, so the grant is only as durable as the sync that
+    follows it -- which is the whole difference between the two callers.
+    """
+    loop = SimLoop(seed=0)
+    loop.net.host("n1")
+    loop.net.set_disk("n1", buffered=True)
+    safeguards = Safeguards(sync_before_vote=sync_before_vote)
+    node = RaftNode(
+        "n1",
+        ["n2", "n3"],
+        DiskStorage(loop.net.host("n1").disk),
+        rng=random.Random(7),
+        safeguards=safeguards,
+    )
+    ask(node, term=1, candidate="n2")
+    loop.net.crash("n1")
+    loop.net.restart("n1")
+    reborn = RaftNode(
+        "n1",
+        ["n2", "n3"],
+        DiskStorage(loop.net.host("n1").disk),
+        rng=random.Random(7),
+        safeguards=safeguards,
+    )
+    granted = ask(reborn, term=1, candidate="n3")["granted"]
+    loop.close()
+    assert isinstance(granted, bool)
+    return granted
+
+
+def test_a_synced_vote_outlives_the_power_cut() -> None:
+    assert _voted_twice_across_a_power_cut(sync_before_vote=True) is False
+
+
+def test_a_vote_left_in_the_buffer_is_granted_again() -> None:
+    assert _voted_twice_across_a_power_cut(sync_before_vote=False) is True
 
 
 def test_without_persistence_a_reload_forgets_the_vote() -> None:

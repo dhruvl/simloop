@@ -12,7 +12,9 @@ changes, no client sessions. Submission is at-least-once and says so: a
 command a leader accepts before being deposed can be resubmitted and commit
 twice, under two indices, and the safety claims below deliberately do not
 mind. Storage is an in-memory stand-in that survives a process restart within
-a run, the way a disk survives a reboot.
+a run, the way a disk survives a reboot — or, when a scenario asks for it,
+a simulated host disk that only makes a write durable when the node syncs it
+and keeps a seeded prefix of the rest when the power goes.
 
 ## The claim, stated honestly
 
@@ -24,6 +26,8 @@ Each rule that carries the safety argument sits behind its own flag in
 `Safeguards`, so the tests can switch exactly one off and watch the explorer
 find the schedule it lets through: stale-term rejection, one vote per term
 (§5.2), the log-freshness check on votes (§5.4.1), persistence before reply,
+the two syncs that make that persistence mean something on a disk that
+buffers — before a vote is granted and before an append is acknowledged —
 the own-term commit gate (§5.4.2), and the per-term no-op that lets a quiet
 term commit (§8).
 
@@ -53,13 +57,22 @@ leader that committed it:
 
 - Scenario suite: 11 seeded scenarios (elections, replication, RPC framing)
   × 10 seeds each, alongside unit tests for the log, vote and persistence
-  rules — 63 fast tests plus the slow proofs, green.
+  rules — 71 fast tests plus the slow proofs, green.
 - Campaign: **50,000 seeds** of five-node chaos — three randomized partition
   windows per seed, a process restart after about half of them, 2% message
   drop and 2% duplication throughout, with a client proposing — invariants
   held on every seed. 917.29s (15m17s) with `--simloop-jobs=8` on an M4
   MacBook Air, about 54 seeds a second. The same scenario runs 300 seeds
   sequentially in 27.97s and 2,000 seeds in 36.34s at `--simloop-jobs=8`.
+- The same chaos on disks that lose power: state on `host.disk` configured
+  `buffered=True, torn=True`, every restart a hard crash. **5,000 seeds**
+  green in 51.55s at `--simloop-jobs=8`, and the 300 the suite runs by
+  default in 14.10s sequentially (M4 MacBook Air, approximate — measured
+  with other work on the machine). Sync discipline is exactly what makes
+  that boring: across 25 seeds the power went out 39 times and found an
+  empty write buffer every time, because the node has already flushed
+  whatever it answered with. Switch one sync off and the same power cuts
+  land on disks holding 13 unflushed records apiece.
 - Replay stability: a one-off local measurement re-explored each ablation's
   found-at seed 100 times on a fresh loop — 5 seeds × 100 replays, one trace
   hash apiece, byte-identical throughout. The standing check is
@@ -76,10 +89,11 @@ leader that committed it:
 | 3 | Persistence before reply off (`persist_before_reply=False`) | leader-completeness | 4 | 5 | `... ::test_skipped_persistence_forgets_committed_entries` |
 | 4 | Stale-term rejection off (`reject_stale_term=False`) | state-machine-safety | 0 | 1 | `... ::test_accepting_stale_terms_rewrites_history` |
 | 5 | Commit gate off (`commit_own_term_only=False`, no-op off both sides) | state-machine-safety | 3 | 4 | `... ::test_committing_old_terms_by_count_loses_writes` |
+| 6 | Sync before acking an append off (`sync_before_ack=False`, on buffered, torn disks) | leader-completeness | 0 | 1 | `... ::test_an_unsynced_ack_loses_a_committed_entry` |
 
-Rows 1–4 searched a budget of 300 seeds, row 5 a budget of 500. All five are
-labeled ablations — detection demonstrations, not bugs that were ever
-shipped.
+Rows 1–4 and 6 searched a budget of 300 seeds, row 5 a budget of 500. All
+six are labeled ablations — detection demonstrations, not bugs that were
+ever shipped.
 
 "Invariant violated" records what the found seed actually produced, not the
 only thing that ablation can produce. Three of the five tests deliberately
@@ -87,6 +101,26 @@ accept any genuine violation class: a node that answers superseded terms, for
 instance, takes both stale appends and stale vote grants, so naming one of the
 four claims would say less than letting the checker report which one broke
 first.
+
+Row 6 is the disk's. A node keeps its whole record — term, vote and log —
+under one key, so a power cut can rewind it to an earlier record but can
+never leave it holding this term beside the previous vote; what makes a
+record durable is the `sync()` the node owes before it answers an RPC. Drop
+the one before an append is acknowledged and the leader counts a follower
+that has the entries in a write buffer and nowhere else: cut the power to
+the followers behind a partition and the term the survivors elect next has
+never heard of an entry that was already committed. Seed 0 produces it, and
+the schedule minimizes to FIFO except one step of 1,273. Put the sync back
+and the same scenario holds across 150 seeds
+(`test_the_synced_ack_carries_the_same_scenario`, slow-marked).
+
+The vote's sync is the same argument with the same flag shape
+(`sync_before_vote`), but the explorer is not what proves it here: the
+window it opens is one heartbeat wide — the winner's first AppendEntries
+flushes the vote behind the voter's back — and 4,000 seeds of a scenario
+built to walk through it never did. `tests/test_votes.py` shows the hazard
+directly instead: grant a vote on a buffered disk, cut the power, and the
+machine that boots grants the same term to somebody else.
 
 Two safeguards are also shown to be load-bearing *on their own*, which is the
 other half of the argument: with the commit gate the only thing standing (the
@@ -140,14 +174,15 @@ take `shrink=True` as an argument.
 ## Run it
 
     uv run pytest examples/raft/tests -q            # fast suite: scenarios, units, ablations
-    uv run pytest examples/raft/tests -q -m slow    # campaign, the two safe proofs, the replay guard
+    uv run pytest examples/raft/tests -q -m slow    # campaigns, the safe proofs, the replay guard
 
 Add `-s` to either and the ablations print the explorer's report — the failing
 seed and the trace around it.
 
-Turn the campaign up and spread the seeds over cores:
+Turn a campaign up and spread the seeds over cores:
 
-    uv run pytest examples/raft/tests/test_chaos_campaign.py -q -m slow --simloop-seeds=50000 --simloop-jobs=8
+    uv run pytest 'examples/raft/tests/test_chaos_campaign.py::test_chaos_campaign_holds_the_invariants' -q -m slow --simloop-seeds=50000 --simloop-jobs=8
+    uv run pytest 'examples/raft/tests/test_chaos_campaign.py::test_the_campaign_holds_on_disks_that_lose_power' -q -m slow --simloop-seeds=5000 --simloop-jobs=8
 
 Replay any campaign failure exactly:
 
