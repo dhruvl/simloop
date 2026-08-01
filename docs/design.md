@@ -99,10 +99,11 @@ properties are load-bearing:
 - **Completeness.** Even a *cancelled* handle's draw is recorded — the draw
   consumed PRNG state, so it is a scheduling decision, and a replay that made
   a different set of draws must produce a different hash.
-- **Injectivity.** Events serialize as `kind|when|seq|label` lines into a
+- **Injectivity.** Events serialize as `kind|when|seq|host|label` lines into a
   SHA-256. Labels are qualified callback names or network labels built from
-  validated host names, and host names may not contain `|`, `>` or newline —
-  so two distinct event streams cannot collide onto one byte sequence.
+  validated host names, the host field is a validated host name itself, and
+  host names may not contain `|`, `>` or newline — so two distinct event
+  streams cannot collide onto one byte sequence.
 
 Hash equality is therefore a cheap, sufficient check that a replay was
 *exact*, not merely same-outcome. It is asserted all over the test suite and

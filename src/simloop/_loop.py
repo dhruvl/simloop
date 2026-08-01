@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, NoReturn, TypeVarTuple, Unpack
 if TYPE_CHECKING:
     from asyncio.events import _TaskFactory
 
-from simloop._net import SimNetwork
+from simloop._net import DRIVER, SimNetwork, _current_host
 from simloop._policy import (
     CHOICE_TYPECODE,
     MAX_CHOICE,
@@ -70,6 +70,23 @@ def _label(callback: Callable[..., object]) -> str:
     if isinstance(name, str):
         return name
     return type(callback).__name__
+
+
+def _host_of(handle: asyncio.Handle) -> str:
+    """The simulated machine whose code this handle will run.
+
+    asyncio copies the scheduling context into every handle, and a task hands
+    its own context to each of its steps, so the pinned host travels with the
+    callback rather than with whoever happened to wake it: a task woken by a
+    packet from another machine is still attributed to its own. Reading it
+    here rather than at scheduling time is what makes that true.
+
+    ``Context.get`` looks up what was *set* in that context and never falls
+    back to the ContextVar's own default, so callbacks scheduled outside any
+    host — the test driver's — have to be named explicitly.
+    """
+    host: str = handle.get_context().get(_current_host, DRIVER)
+    return host
 
 
 class SimLoop(asyncio.AbstractEventLoop):
@@ -211,7 +228,10 @@ class SimLoop(asyncio.AbstractEventLoop):
         self._next_seq += 1
         label = _label(callback)
         self._ready.append((seq, label, handle))
-        self._recorder.record("schedule", self._now, seq, label)
+        # A schedule event names the host that *asked* for the callback, which
+        # is not always the one that will run it: that difference is exactly
+        # how a wakeup crossing machines shows up in the trace.
+        self._recorder.record("schedule", self._now, seq, label, _current_host.get())
         return handle
 
     def call_later(
@@ -269,7 +289,7 @@ class SimLoop(asyncio.AbstractEventLoop):
         self._next_seq += 1
         label = _label(callback)
         heapq.heappush(self._timers, (when, seq, label, timer))
-        self._recorder.record("schedule", self._now, seq, label)
+        self._recorder.record("schedule", self._now, seq, label, _current_host.get())
         return timer
 
     def _step(self) -> None:
@@ -282,18 +302,19 @@ class SimLoop(asyncio.AbstractEventLoop):
         assert index <= MAX_CHOICE, "ready queue outgrew the choice log"
         self._choice_log.append(index)
         seq, label, handle = self._ready.pop(index)
+        host = _host_of(handle)
         if handle.cancelled():
             # The draw itself is a scheduling decision, so a skipped handle
             # must appear in the trace for the replay proof to stay complete.
-            self._recorder.record("cancel", self._now, seq, label)
+            self._recorder.record("cancel", self._now, seq, label, host)
             return
-        self._recorder.record("run", self._now, seq, label)
+        self._recorder.record("run", self._now, seq, label, host)
         handle._run()
 
     def _advance_clock(self) -> None:
         while self._timers and self._timers[0][3].cancelled():
-            _, seq, label, _timer = heapq.heappop(self._timers)
-            self._recorder.record("cancel", self._now, seq, label)
+            _, seq, label, timer = heapq.heappop(self._timers)
+            self._recorder.record("cancel", self._now, seq, label, _host_of(timer))
         if not self._timers:
             raise SimulationDeadlockError(
                 "nothing left to run: no ready callbacks and no pending timers"
@@ -303,7 +324,7 @@ class SimLoop(asyncio.AbstractEventLoop):
         while self._timers and self._timers[0][0] <= self._now:
             _, seq, label, timer = heapq.heappop(self._timers)
             if timer.cancelled():
-                self._recorder.record("cancel", self._now, seq, label)
+                self._recorder.record("cancel", self._now, seq, label, _host_of(timer))
             else:
                 self._ready.append((seq, label, timer))
 
