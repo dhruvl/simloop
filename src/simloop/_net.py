@@ -280,6 +280,7 @@ class SimNetwork:
         self._names: dict[str, str] = {}
         self._alive: dict[str, bool] = {}
         self._disks: dict[str, SimDisk] = {}
+        self._clock_offsets: dict[str, float] = {}
         self._tasks: dict[str, list[asyncio.Task[Any]]] = {}
         self._default_latency: tuple[float, float] = (0.0, 0.0)
         self._default_drop = 0.0
@@ -436,6 +437,26 @@ class SimNetwork:
         if duplicate is not None:
             link.duplicate = _check_probability("duplicate", duplicate)
 
+    def set_clock(self, name: str, *, offset: float) -> None:
+        """Skew what a host's tasks read from the clock, in seconds.
+
+        Offset changes what ``loop.time()`` *reads* on that host — never how
+        long a duration takes: ``asyncio.sleep(1.0)`` still costs one true
+        second everywhere, which is what a wrong wall clock does on a real
+        machine. Deadlines passed to ``call_at`` are interpreted on the
+        calling task's clock. The driver and unconfigured hosts read true
+        time.
+        """
+        self._require_host(name)
+        self._clock_offsets[name] = float(offset)
+
+    def clock_offset(self, name: str) -> float:
+        self._require_host(name)
+        return self._clock_offsets.get(name, 0.0)
+
+    def _offset_now(self) -> float:
+        return self._clock_offsets.get(_current_host.get(), 0.0)
+
     def partition(self, group_a: Iterable[str], group_b: Iterable[str]) -> None:
         side_a = [self._require_host(name) for name in group_a]
         side_b = [self._require_host(name) for name in group_b]
@@ -497,8 +518,16 @@ class SimNetwork:
         return port
 
     def _trace(self, verb: str, packet: _Packet) -> None:
+        # Trace timestamps are always the true clock, never the calling
+        # host's: a packet event happens once, at one shared instant, and
+        # traces from differently-skewed runs have to stay comparable.
+        # _deliver and the transports run under a host context, so
+        # loop.time() here would read that host's skewed clock.
         self._loop._recorder.record(
-            "net", self._loop.time(), packet.uid, f"{verb} {packet.src}>{packet.dst}"
+            "net",
+            self._loop._true_time(),
+            packet.uid,
+            f"{verb} {packet.src}>{packet.dst}",
         )
 
     def _transmit(self, packet: _Packet) -> None:
@@ -795,7 +824,7 @@ class SimNetwork:
                 kept.append(packet)
         self._held = kept
         self._loop._recorder.record(
-            "net", self._loop.time(), self._new_uid(), f"crash {name}"
+            "net", self._loop._true_time(), self._new_uid(), f"crash {name}"
         )
 
     def restart(self, name: str) -> None:
@@ -814,7 +843,7 @@ class SimNetwork:
             raise ValueError(f"host {name!r} is not crashed")
         self._alive[name] = True
         self._loop._recorder.record(
-            "net", self._loop.time(), self._new_uid(), f"restart {name}"
+            "net", self._loop._true_time(), self._new_uid(), f"restart {name}"
         )
 
     def _register_task(self, task: asyncio.Task[Any]) -> None:
