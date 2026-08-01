@@ -218,11 +218,10 @@ writes, subprocesses, signals, and loop-level TLS upgrades raise
 `SimulationFenceError` rather than silently breaking determinism.
 `sock_connect` on an `AF_INET` stream socket is the exception — it is
 simulated, so a client that connects a socket and hands it to
-`create_connection` runs, while the datagram and raw variants still
-fence. Name resolution stays inside
-the simulation: `getaddrinfo` resolves sim host names to stable synthetic
-addresses and raises `socket.gaierror` for anything else — no real DNS,
-ever.
+`create_connection` runs, while the datagram and raw variants still fence.
+Name resolution stays inside the simulation: `getaddrinfo` resolves sim
+host names to stable synthetic addresses and raises `socket.gaierror` for
+anything else — no real DNS, ever.
 Write-side flow control is not simulated.
 The full contract is in [docs/supported-api.md](https://github.com/dhruvl/simloop/blob/main/docs/supported-api.md).
 What that contract costs real libraries — what aiohttp, anyio, websockets and
