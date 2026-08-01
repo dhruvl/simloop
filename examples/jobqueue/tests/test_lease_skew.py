@@ -86,9 +86,14 @@ async def _skew_workload() -> str:
     helpers.verify(cluster)
     trace = loop.trace_hash()  # taken at quiesce: the run, not the teardown
     # Then shut everything down — servers, workers, open connection handlers —
-    # so the loop closes with nothing suspended mid-write.
+    # so the loop closes with nothing suspended mid-write. `all_tasks()` is a
+    # set, so sort it by name: the teardown cannot smuggle in id ordering.
+    # (The hash above is taken before any of this runs, deliberately.)
     here = asyncio.current_task()
-    running = [task for task in asyncio.all_tasks() if task is not here]
+    running = sorted(
+        (task for task in asyncio.all_tasks() if task is not here),
+        key=lambda task: task.get_name(),
+    )
     for task in running:
         task.cancel()
     await asyncio.gather(*running, return_exceptions=True)
@@ -96,9 +101,9 @@ async def _skew_workload() -> str:
     return trace
 
 
-def _skew_hash(offset: float) -> str:
-    loop = SimLoop(seed=3)
-    # Both runs register the hosts in the same order; only the offset differs.
+def _skew_hash(seed: int, offset: float) -> str:
+    loop = SimLoop(seed=seed)
+    # Every run registers the hosts in the same order; only the offset differs.
     for name in ("broker", "w1", "w2", "c1"):
         loop.net.host(name)
     loop.net.set_clock("w2", offset=offset)
@@ -116,4 +121,6 @@ def test_skew_alone_does_not_change_what_happens() -> None:
     # readings, all of them its own. A worker's wrong clock is therefore
     # unobservable — the packet trace is byte-identical either way, which is
     # also why no ablation of *this* app can turn skew into a violation.
-    assert _skew_hash(0.0) == _skew_hash(SKEW_S) == _skew_hash(-SKEW_S)
+    for seed in (0, 7):
+        hashes = {_skew_hash(seed, offset) for offset in (0.0, SKEW_S, -SKEW_S)}
+        assert len(hashes) == 1, f"seed {seed}: the skew moved the trace"

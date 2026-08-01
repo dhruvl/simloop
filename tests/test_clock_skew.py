@@ -97,13 +97,14 @@ def test_call_at_means_the_callers_clock() -> None:
 
     loop.run_until_complete(loop.net.host("worker").create_task(schedule()))
     loop.close()
+    # The run lasts two true seconds, so firing at all is what pins the
+    # deadline to one true second away: read as eleven true seconds, the
+    # callback would never have run.
     assert len(fired_at) == 1
     # The callback carries the scheduling task's context (asyncio copies the
     # current context into the handle), so it reads the worker's clock as
     # well: it sees exactly the deadline it was given.
     assert fired_at[0] == pytest.approx(11.0)
-    # And that deadline is one true second after scheduling, not eleven.
-    assert fired_at[0] - loop.net.clock_offset("worker") == pytest.approx(1.0)
 
 
 def test_call_later_ignores_the_offset() -> None:
