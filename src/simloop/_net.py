@@ -229,6 +229,9 @@ class Host:
     def crash(self) -> None:
         self._net.crash(self._name)
 
+    def restart(self) -> None:
+        self._net.restart(self._name)
+
 
 class SimNetwork:
     """Registry of hosts and the traffic between them."""
@@ -756,6 +759,27 @@ class SimNetwork:
             else:
                 kept.append(packet)
         self._held = kept
+        self._loop._recorder.record(
+            "net", self._loop.time(), self._new_uid(), f"crash {name}"
+        )
+
+    def restart(self, name: str) -> None:
+        """Bring a crashed host back as a fresh incarnation.
+
+        Restart revives liveness and nothing else: the old incarnation's
+        tasks are already cancelled, its listeners and binds are gone, and
+        its stream connections are dead — packets addressed to them vanish,
+        so peers still learn about the outage only from their own timeouts.
+        The caller boots whatever should run on the revived machine, the
+        same way it booted the machine the first time.
+        """
+        self._require_host(name)
+        if self._alive[name]:
+            raise ValueError(f"host {name!r} is not crashed")
+        self._alive[name] = True
+        self._loop._recorder.record(
+            "net", self._loop.time(), self._new_uid(), f"restart {name}"
+        )
 
     def _register_task(self, task: asyncio.Task[Any]) -> None:
         owner = self._tasks[_current_host.get()]
