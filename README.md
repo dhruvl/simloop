@@ -189,6 +189,29 @@ events are drawn, and the page says so when there were more.
 `simloop.timeline_html(events)` renders the same page from any trace you are
 holding.
 
+## Compose with Hypothesis
+
+Hypothesis searches the data; simloop searches the schedule. `@given` builds
+the workload, `explore()` runs that workload under a range of seeds, and the
+property is "no seed broke it":
+
+```python
+@settings(deadline=None, derandomize=True, database=None)
+@given(writers=st.integers(1, 4), payloads=st.lists(st.text(), min_size=1))
+def test_the_log_keeps_every_append(writers, payloads):
+    report = explore(lambda: replicate(writers, payloads), range(8))
+    assert report is None, report.render()
+```
+
+A failure then arrives in two halves: Hypothesis reports the smallest workload
+that still breaks, simloop reports the seed that breaks it and the command
+that replays it. Seeds stay out of the strategies on purpose — a seed has no
+size to shrink toward, and two shrinkers aimed at one failure fight. The
+worked example, the settings CI needs and the honest limits are in
+[docs/cookbook.md](https://github.com/dhruvl/simloop/blob/main/docs/cookbook.md),
+and the composition is a test in this repository rather than a claim. It stays
+a recipe: simloop has no Hypothesis dependency and no integration package.
+
 ## What the simulation gives you
 
 - **Seeded scheduling** — the ready queue's execution order comes from a

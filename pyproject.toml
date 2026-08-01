@@ -25,7 +25,7 @@ Repository = "https://github.com/dhruvl/simloop"
 Issues = "https://github.com/dhruvl/simloop/issues"
 
 [dependency-groups]
-dev = ["pytest>=8", "mypy>=1.11"]
+dev = ["pytest>=8", "mypy>=1.11", "hypothesis>=6"]
 # Third-party libraries the compatibility probes drive. Dev-only and pinned
 # exactly, so docs/compatibility.md's version column describes what actually
 # ran; never installed by a plain `uv run pytest`.
