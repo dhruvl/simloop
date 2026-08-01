@@ -127,8 +127,8 @@ sends the handshake as ordinary bytes over the simulated connection, so
 `loop.start_tls` is never called and nothing stops the attempt. Where it
 ends is up to whatever is listening: aimed at the plaintext responder
 these probes use, the handshake goes unanswered and the request dies of
-httpx's own `ConnectTimeout`. That is a one-off measurement rather than a
-row — no probe on this page requests `https://`.
+httpx's own `ConnectTimeout`. That timeout is a one-off measurement
+rather than a row — no probe on this page requests `https://`.
 
 ## Not tested
 
@@ -138,7 +138,7 @@ row — no probe on this page requests `https://`.
 - **TLS anywhere**: no probe on this page requests `https://` or `wss://`.
   simloop fences `start_tls` and `create_connection(ssl=...)`, but a stack
   that runs its handshake in memory reaches neither — it reaches a simulated
-  network with nothing on it that speaks TLS.
+  network with nothing on it that speaks TLS unless the test puts it there.
 - Anything that reaches outside the loop by design — threads, executors,
   subprocesses, signals, real DNS. Those are fences, listed in
   [docs/supported-api.md](supported-api.md), not compatibility questions.
