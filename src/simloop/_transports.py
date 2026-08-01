@@ -133,12 +133,12 @@ class _SimSocket:
     def fileno(self) -> int:
         # httpcore's is_socket_readable() polls this fd to decide whether a
         # pooled connection died. A parked socketpair end reads not-readable
-        # until its peer end is written to or closed, so the poll tracks the
-        # simulated connection: alive while the transport lives, readable
-        # (= discard me) once the peer is gone. -1 after teardown is what a
-        # closed real socket reports. Lazy: connections nobody introspects
-        # cost no descriptors, which matters at campaign scale.
-        if self._disposed or self._transport._closed:
+        # until its peer end is closed, so the poll answers exactly one
+        # question: has the peer's EOF arrived? A reset or a teardown closes
+        # both ends instead and reports -1, which the same poll reads as dead
+        # just as a closed real socket would. Lazy: connections nobody
+        # introspects cost no descriptors, which matters at campaign scale.
+        if self._disposed:
             return -1
         if self._park is None:
             self._park = socket.socketpair()
@@ -150,7 +150,7 @@ class _SimSocket:
         return self._park[1].fileno()
 
     def _peer_gone(self) -> None:
-        # EOF or reset arrived: closing the held end makes the exposed end
+        # The peer's EOF arrived: closing the held end makes the exposed end
         # poll readable, exactly when a real kernel would report it.
         if self._park is not None:
             self._park[0].close()
@@ -287,9 +287,11 @@ class _SimStreamTransport(asyncio.Transport):
             self.close()
 
     def _reset_arrived(self) -> None:
+        # No _peer_gone() here: a reset tears the connection down on the spot,
+        # and _finish closes both parked ends. The descriptor goes to -1
+        # rather than turning readable, which a liveness poll reads the same
+        # way — as a connection to discard.
         self._peer_closed = True
-        if self._extra_socket is not None:
-            self._extra_socket._peer_gone()
         if self._closed:
             return
         self._finish(ConnectionResetError("Connection reset by peer"))
@@ -331,6 +333,11 @@ class _SimStreamTransport(asyncio.Transport):
         if name == "socket":
             if self._extra_socket is None:
                 self._extra_socket = _SimSocket(self)
+                if self._closed:
+                    # Asked for after teardown: born closed, like the socket a
+                    # finished connection leaves behind. Nothing here may hand
+                    # out a live descriptor for a connection that is gone.
+                    self._extra_socket._dispose()
             return self._extra_socket
         return default
 
