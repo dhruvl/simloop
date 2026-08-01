@@ -202,6 +202,17 @@ Decisions inside that model, each doing real work:
   listeners close, and they go silent. Peers cannot distinguish a crash from
   a partition except by timeout — which is the entire epistemology of
   distributed failure detection, enforced by construction.
+- **A disk lies only when asked to.** Storage is durable at assignment
+  unless a host opts into `set_disk(name, buffered=True)`, because the
+  default has to be the one that costs nothing: an unconfigured disk draws
+  no numbers, records no events, and leaves every existing trace hash where
+  it was. Opted in, writes queue until `sync()`, and a crash keeps a seeded
+  *prefix* of the queue. A prefix, deliberately: real hardware also reorders
+  and corrupts individual sectors, and modeling that would need a sector
+  layer nothing else here would use, while a prefix is the failure an
+  application can actually defend against — write, sync, and only then act
+  on it. Skipping that sync is a bug the simulation can now find, which is
+  the whole reason the model exists.
 - **The accept is sequence 0.** The server builds its transport and sends
   `accept` before its protocol's `connection_made` can write; the client
   transport is built when the accept is *dispatched*, not when the connector

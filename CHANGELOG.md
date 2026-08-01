@@ -53,8 +53,17 @@
   leaving peers to notice the outage from their own timeouts. Crashes are
   recorded too: `crash()` writes a trace event and consumes a uid.
 - Every host now has `host.disk`, a mapping that survives its crashes:
-  where state a real process would fsync belongs. Writes are atomic at
-  assignment; there is no partial-write model.
+  where state a real process would fsync belongs. Writes are durable at
+  assignment and `disk.sync()` does nothing — until the host asks for
+  otherwise with `loop.net.set_disk(name, buffered=True)`, which queues
+  writes and deletes until a `sync()` while the host itself reads them
+  back immediately. A crash then takes the queue with it, and `torn=True`
+  keeps a seeded prefix of it instead: the state a machine that lost power
+  mid-batch actually reboots into. A prefix is all it claims to be —
+  nothing is reordered and no value is ever half-written. A disk nobody
+  configured is untouched down to the draw: storage records no trace
+  events and consumes no randomness, so those runs decide everything
+  exactly as they did before.
 - Clocks can lie per host: `loop.net.set_clock(name, offset=...)` skews
   what that host's tasks read from `loop.time()`, and the deadlines they
   hand to `call_at` with it, while durations (`sleep`, `timeout`,
@@ -64,10 +73,12 @@
   exactly the decisions it made without the feature.
 - A second flagship demo: `examples/raft/` is a teaching-sized Raft (leader
   election + log replication, plain asyncio on streams) tested only under
-  simulation — four safety invariants checked over 50,000 chaos seeds, five
+  simulation — four safety invariants checked over 50,000 chaos seeds, six
   safeguard ablations each caught and replayed from a seed, and failing
   schedules minimized toward FIFO — down to a single interesting step in the
-  sharpest case.
+  sharpest case. Its state can live on host disks that buffer and tear, with
+  the syncs Raft owes before it answers an RPC; drop the sync before an
+  append is acknowledged and the first seed loses a committed entry.
 - Campaign evidence at scale, regenerable via `benchmarks/campaign.py`:
   100,000 seeds of jobqueue chaos green in under six minutes on a laptop,
   every ablation caught with its failure density recorded, and 20 sampled
