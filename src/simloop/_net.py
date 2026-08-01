@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import random
 import socket
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator, MutableMapping
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -208,6 +208,36 @@ def _check_latency(value: tuple[float, float]) -> tuple[float, float]:
     return (lo, hi)
 
 
+class SimDisk(MutableMapping[str, object]):
+    """A host's storage that survives crashes and restarts.
+
+    A crash loses everything volatile — tasks, connections, binds — but not
+    what was written here, which is the whole point: this is where state
+    that a real process would fsync belongs. Writes are atomic at
+    assignment; there is no partial-write model. Values are stored as
+    given, so mutating a stored object later is the caller's own aliasing,
+    exactly as it would be with a cache in front of a real disk.
+    """
+
+    def __init__(self) -> None:
+        self._data: dict[str, object] = {}
+
+    def __getitem__(self, key: str) -> object:
+        return self._data[key]
+
+    def __setitem__(self, key: str, value: object) -> None:
+        self._data[key] = value
+
+    def __delitem__(self, key: str) -> None:
+        del self._data[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._data)
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+
 class Host:
     """Handle for one simulated machine; tasks started here are pinned to it."""
 
@@ -218,6 +248,10 @@ class Host:
     @property
     def name(self) -> str:
         return self._name
+
+    @property
+    def disk(self) -> SimDisk:
+        return self._net._disks.setdefault(self._name, SimDisk())
 
     def create_task(self, coro: Any, *, name: str | None = None) -> asyncio.Task[Any]:
         token = _current_host.set(self._name)
@@ -245,6 +279,7 @@ class SimNetwork:
         self._addresses: dict[str, str] = {}
         self._names: dict[str, str] = {}
         self._alive: dict[str, bool] = {}
+        self._disks: dict[str, SimDisk] = {}
         self._tasks: dict[str, list[asyncio.Task[Any]]] = {}
         self._default_latency: tuple[float, float] = (0.0, 0.0)
         self._default_drop = 0.0
@@ -770,8 +805,9 @@ class SimNetwork:
         tasks are already cancelled, its listeners and binds are gone, and
         its stream connections are dead — packets addressed to them vanish,
         so peers still learn about the outage only from their own timeouts.
-        The caller boots whatever should run on the revived machine, the
-        same way it booted the machine the first time.
+        State meant to survive the reboot belongs on ``Host.disk``. The
+        caller boots whatever should run on the revived machine, the same
+        way it booted the machine the first time.
         """
         self._require_host(name)
         if self._alive[name]:
