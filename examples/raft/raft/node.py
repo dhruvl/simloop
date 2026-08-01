@@ -41,6 +41,11 @@ class Safeguards:
     one_vote_per_term: bool = True      # never grant two candidates one term
     check_log_up_to_date: bool = True   # §5.4.1: voters gate on log freshness
     persist_before_reply: bool = True   # durability before acknowledgement
+    # A write is only as durable as the disk it landed on. On a buffered disk
+    # these two are what push it past the buffer before the answer that
+    # depends on it goes out; on a disk that never buffers they cost nothing.
+    sync_before_vote: bool = True       # a vote is on the disk before it is granted
+    sync_before_ack: bool = True        # entries are on the disk before they are acked
     # §5.4.2: count replicas only for own-term entries. With leader_noop on,
     # every reachable quorum index already carries the leader's term, so this
     # gate only shows its teeth when the no-op is off too.
@@ -149,8 +154,9 @@ class RaftNode:
         except (asyncio.IncompleteReadError, OSError, wire.FrameError):
             # IncompleteReadError is named on its own because it is not an
             # OSError. OSError here means a torn socket -- which also swallows
-            # one raised out of handle(), acceptable only while storage is in
-            # memory; a file-backed Storage needs its own except clause.
+            # one raised out of handle(), acceptable only while no Storage
+            # here can fail a write; a real file-backed one needs its own
+            # except clause.
             pass
         finally:
             writer.close()
@@ -329,7 +335,7 @@ class RaftNode:
         if self._safeguards.check_log_up_to_date and theirs < ours:
             return refused
         self._state.voted_for = m["candidate"]
-        self._persist()
+        self._persist(sync=self._safeguards.sync_before_vote)
         self._reset.set()  # granting a vote defers our own candidacy
         return {"term": self._state.term, "granted": True}
 
@@ -351,7 +357,7 @@ class RaftNode:
                 del log[index - 1 :]
             if index > len(log):
                 log.append(Entry(entry_term, command))
-        self._persist()
+        self._persist(sync=self._safeguards.sync_before_ack)
         if m["leader_commit"] > self.commit_index:
             # max(): a backed-off heartbeat carries a short verified prefix;
             # the commit mark never moves backwards for it.
@@ -380,9 +386,11 @@ class RaftNode:
         self._persist()
         self.role = FOLLOWER
 
-    def _persist(self) -> None:
+    def _persist(self, *, sync: bool = True) -> None:
         if self._safeguards.persist_before_reply:
             self._storage.save(self._state)
+            if sync:
+                self._storage.sync()
 
     def _last_log_term(self) -> int:
         return self._state.log[-1].term if self._state.log else 0

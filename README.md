@@ -233,7 +233,9 @@ net.crash("node2")                              # no reset, just silence
 - **Crashes with a way back** — `net.crash` kills a host's tasks and
   binds, `net.restart` brings it back as a fresh incarnation, and
   `host.disk` is a mapping that outlives both: machines die, reboot, and
-  remember what they wrote down.
+  remember what they wrote down. `net.set_disk(name, buffered=True,
+  torn=True)` makes the disk lie too — writes only land on `sync()`, and a
+  crash keeps a seeded prefix of whatever was still queued.
 - **Clocks that lie** — `net.set_clock(name, offset=...)` skews what one
   host reads from the clock without changing how long anything takes, for
   testing lease and timeout code against machines that disagree about the
