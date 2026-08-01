@@ -11,6 +11,7 @@ import asyncio
 import ipaddress
 import select
 import socket
+from collections.abc import Callable, Coroutine
 from typing import Any
 
 import pytest
@@ -261,4 +262,95 @@ def test_sock_connect_consumes_no_virtual_time() -> None:
             sock.close()
 
     assert loop.run_until_complete(main()) == 0.0
+    loop.close()
+
+
+def _aiohttp_style_connect(
+    loop: SimLoop, port: int = 9000
+) -> Callable[[], Coroutine[Any, Any, tuple[Any, Any, Any]]]:
+    """The exact two-call sequence aiohttp + aiohappyeyeballs performs."""
+
+    async def connect() -> tuple[Any, Any, Any]:
+        infos = await loop.getaddrinfo("server", port, type=socket.SOCK_STREAM)
+        family, kind, proto, _, address = infos[0]
+        sock = socket.socket(family=family, type=kind, proto=proto)
+        sock.setblocking(False)
+        await loop.sock_connect(sock, address)
+        transport, protocol = await loop.create_connection(
+            asyncio.Protocol, ssl=None, server_hostname=None, sock=sock
+        )
+        return sock, transport, protocol
+
+    return connect
+
+
+def test_parked_socket_upgrades_to_a_sim_connection() -> None:
+    loop = _network()
+    loop.net.set_defaults(latency=(0.001, 0.001))  # so the round trip is visible
+
+    async def main() -> tuple[Any, Any]:
+        server = await loop.net.host("server").create_task(
+            asyncio.start_server(_hold_open, "0.0.0.0", 9000)
+        )
+        started = loop.time()
+        sock, transport, _ = await loop.net.host("client").create_task(
+            _aiohttp_style_connect(loop)()
+        )
+        elapsed = loop.time() - started
+        transport.close()
+        server.close()
+        return sock, elapsed
+
+    sock, elapsed = loop.run_until_complete(main())
+    loop.run_until_complete(asyncio.sleep(1.0))  # let both ends finish closing
+    assert sock.fileno() == -1  # the loop took ownership and closed it
+    assert elapsed > 0.0  # the handshake cost its round trip
+    assert not loop._sock_targets  # the parked entry was claimed
+    loop.close()
+
+
+def test_refused_port_raises_from_the_upgrade() -> None:
+    loop = _network()
+    loop.net.set_defaults(latency=(0.001, 0.001))
+
+    async def main() -> None:
+        with pytest.raises(ConnectionRefusedError):
+            await loop.net.host("client").create_task(
+                _aiohttp_style_connect(loop, port=9999)()
+            )
+
+    loop.run_until_complete(main())
+    loop.close()
+
+
+def test_unparked_socket_is_rejected() -> None:
+    loop = _network()
+
+    async def main() -> None:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            with pytest.raises(OSError, match="sock_connect"):
+                await loop.create_connection(asyncio.Protocol, sock=sock)
+        finally:
+            sock.close()
+
+    loop.run_until_complete(main())
+    loop.close()
+
+
+def test_sock_and_host_together_follow_stdlib_rules() -> None:
+    loop = _network()
+
+    async def main() -> None:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            await loop.sock_connect(sock, ("server", 9000))
+            with pytest.raises(ValueError):
+                await loop.create_connection(
+                    asyncio.Protocol, "server", 9000, sock=sock
+                )
+        finally:
+            sock.close()
+
+    loop.run_until_complete(main())
     loop.close()

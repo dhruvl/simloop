@@ -392,7 +392,24 @@ class SimLoop(asyncio.AbstractEventLoop):
         port: Any = None,
         **kwargs: Any,
     ) -> Any:
+        sock = kwargs.pop("sock", None)
         _reject_kwargs("create_connection", kwargs)
+        if sock is not None:
+            # The stdlib treats a passed-in socket as already connected and
+            # takes ownership of it. Here "connected" means sock_connect
+            # parked a target for it; the real descriptor is closed at once
+            # because the simulation only needed the address it carried.
+            if host is not None or port is not None:
+                raise ValueError(
+                    "host/port and sock can not be specified at the same time"
+                )
+            target = self._sock_targets.pop(sock, None)
+            if target is None:
+                raise OSError(
+                    "the given socket was not connected via sock_connect on this loop"
+                )
+            sock.close()
+            host, port = target
         return await self._net._open_connection(protocol_factory, host, port)
 
     async def create_server(
