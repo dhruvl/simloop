@@ -234,6 +234,64 @@ def test_jobs_flag_rejects_a_job_count_below_one(pytester: pytest.Pytester) -> N
     result.stderr.fnmatch_lines(["*--simloop-jobs must be at least 1*"])
 
 
+def test_policy_flag_explores_under_pct(pytester: pytest.Pytester) -> None:
+    pytester.makepyfile(test_demo=_FLAKY)
+    result = pytester.runpytest_subprocess("--simloop-policy=pct")
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(
+        [
+            "*simloop: failed at seed 3 (3 seeds passed first)*",
+            "*replay: pytest 'test_demo.py::test_flaky' --simloop-replay=3 "
+            "--simloop-policy=pct*",
+            "*policy: pct (depth 3, horizon *)*",
+        ]
+    )
+
+
+def test_pct_depth_flag_reaches_the_policy(pytester: pytest.Pytester) -> None:
+    pytester.makepyfile(test_demo=_FLAKY)
+    result = pytester.runpytest_subprocess(
+        "--simloop-policy=pct", "--simloop-pct-depth=5"
+    )
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(
+        [
+            "*--simloop-replay=3 --simloop-policy=pct --simloop-pct-depth=5*",
+            "*policy: pct (depth 5, horizon *)*",
+        ]
+    )
+
+
+def test_no_policy_line_by_default(pytester: pytest.Pytester) -> None:
+    pytester.makepyfile(test_demo=_FLAKY)
+    result = pytester.runpytest_subprocess()
+    result.assert_outcomes(failed=1)
+    result.stdout.no_fnmatch_line("*policy:*")
+
+
+def test_policy_flag_rejects_an_unknown_policy(pytester: pytest.Pytester) -> None:
+    pytester.makepyfile(test_demo=_FLAKY)
+    result = pytester.runpytest_subprocess("--simloop-policy=greedy")
+    assert result.ret != 0
+    result.stderr.fnmatch_lines(["*--simloop-policy*invalid choice*"])
+
+
+def test_pct_depth_flag_rejects_a_depth_below_one(pytester: pytest.Pytester) -> None:
+    pytester.makepyfile(test_demo=_FLAKY)
+    result = pytester.runpytest_subprocess("--simloop-pct-depth=0")
+    assert result.ret != 0
+    result.stderr.fnmatch_lines(["*--simloop-pct-depth must be at least 1*"])
+
+
+def test_pct_refuses_worker_processes(pytester: pytest.Pytester) -> None:
+    pytester.makepyfile(test_demo=_FLAKY)
+    result = pytester.runpytest_subprocess("--simloop-policy=pct", "--simloop-jobs=2")
+    assert result.ret != 0
+    result.stderr.fnmatch_lines(
+        ["*--simloop-policy=pct explores sequentially*--simloop-jobs*"]
+    )
+
+
 def test_replay_flag_runs_exactly_one_seed(pytester: pytest.Pytester) -> None:
     pytester.makepyfile(test_demo=_FLAKY)
     result = pytester.runpytest_subprocess("--simloop-replay=3")

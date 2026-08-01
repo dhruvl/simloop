@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from simloop import _explore
+from simloop._explore import POLICIES
 from simloop._shrink import DEFAULT_BUDGET
 
 
@@ -49,6 +50,19 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         metavar="N",
         help="explore each @sim_test's seeds across N worker processes",
     )
+    group.addoption(
+        "--simloop-policy",
+        choices=POLICIES,
+        default=None,
+        help="how the scheduler picks: seeded uniform draws, or PCT priorities",
+    )
+    group.addoption(
+        "--simloop-pct-depth",
+        type=int,
+        default=None,
+        metavar="N",
+        help="ordering constraints PCT aims to hit (--simloop-policy=pct only)",
+    )
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -65,6 +79,19 @@ def pytest_configure(config: pytest.Config) -> None:
     if jobs < 1:
         raise pytest.UsageError("--simloop-jobs must be at least 1")
     _explore.overrides.jobs = jobs
+    policy = config.getoption("--simloop-policy")
+    depth = config.getoption("--simloop-pct-depth")
+    if depth is not None and depth < 1:
+        raise pytest.UsageError("--simloop-pct-depth must be at least 1")
+    if policy == "pct" and jobs > 1:
+        # The horizon PCT works to is measured in this process and does not
+        # reach a worker, so the combination is refused here rather than at
+        # the first sim test that would have explored under it.
+        raise pytest.UsageError(
+            "--simloop-policy=pct explores sequentially: drop --simloop-jobs"
+        )
+    _explore.overrides.policy = policy
+    _explore.overrides.pct_depth = depth
     _explore.overrides.sim_tests = 0
     _explore.overrides.seeds_explored = 0
 
@@ -75,6 +102,8 @@ def pytest_unconfigure(config: pytest.Config) -> None:
     _explore.overrides.shrink = False
     _explore.overrides.shrink_budget = DEFAULT_BUDGET
     _explore.overrides.jobs = 1
+    _explore.overrides.policy = None
+    _explore.overrides.pct_depth = None
     _explore.overrides.node_id = None
 
 
