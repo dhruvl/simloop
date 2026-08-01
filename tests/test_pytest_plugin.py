@@ -2,6 +2,16 @@
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _utf8_child_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A failure traceback can render source lines that carry an em-dash. On
+    # Windows the child pytest writes them in the console code page while
+    # pytester reads the output back as UTF-8, so pin the child's stdio to
+    # UTF-8 and let the bytes survive the round trip.
+    monkeypatch.setenv("PYTHONIOENCODING", "utf-8")
+
+
 _FLAKY = """
 import asyncio
 from simloop import sim_test

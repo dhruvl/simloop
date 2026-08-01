@@ -179,6 +179,27 @@ def test_unsupported_apis_are_fenced() -> None:
         loop.close()
 
 
+def test_an_eager_task_start_is_fenced() -> None:
+    # An eager first step would run at creation time, before the seeded draw
+    # could order it, so asking for one must fail loudly. Declining it is the
+    # stdlib default and keeps working.
+    async def noop() -> None:
+        pass
+
+    loop = SimLoop(seed=0)
+
+    async def main() -> None:
+        await loop.create_task(noop(), eager_start=False)
+        coro = noop()
+        with pytest.raises(SimulationFenceError, match="eager_start"):
+            loop.create_task(coro, eager_start=True)
+        coro.close()
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()
+
+
 def test_trace_is_recorded() -> None:
     async def main() -> None:
         await asyncio.sleep(1.0)

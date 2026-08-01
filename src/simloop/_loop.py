@@ -449,8 +449,15 @@ class SimLoop(asyncio.AbstractEventLoop):
             # collector to complain about. Draining stops as soon as no work
             # remains, keeping the seeded draw the only source of order.
             fut.cancel()
-            while (self._ready or self._timers) and not fut.done():
-                self._step()
+            # The drain steps outside run_forever, but a task will only step
+            # while its loop is the running one (asyncio enforces this from
+            # 3.14), so the drain must declare itself the same way.
+            events._set_running_loop(self)
+            try:
+                while (self._ready or self._timers) and not fut.done():
+                    self._step()
+            finally:
+                events._set_running_loop(None)
         # A fire-and-forget task that failed keeps itself alive through a
         # reference cycle (its exception's traceback pins the coroutine frame),
         # so its exception only reaches call_exception_handler when the cycle
@@ -516,8 +523,14 @@ class SimLoop(asyncio.AbstractEventLoop):
         *,
         name: str | None = None,
         context: Context | None = None,
+        eager_start: bool | None = None,
     ) -> asyncio.Task[Any]:
         self._check_closed()
+        if eager_start:
+            # An eager first step runs at creation time, before the ready
+            # queue ever sees the task, so the seeded draw would never get to
+            # order it against anything.
+            _fence("create_task(eager_start=True)")
         if self._task_factory is None:
             task: asyncio.Task[Any] = asyncio.Task(
                 coro, loop=self, name=name, context=context
