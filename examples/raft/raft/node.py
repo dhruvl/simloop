@@ -99,15 +99,19 @@ class RaftNode:
     # ------------------------------------------------------------------
 
     async def run(self) -> None:
-        handlers: set[asyncio.Task[None]] = set()
+        # An insertion-ordered dict rather than a set: the sweep below cancels
+        # these in iteration order, and a set of tasks iterates by id(), which
+        # moves between runs -- two handlers swapping places there is enough to
+        # give one seed two different traces.
+        handlers: dict[asyncio.Task[None], None] = {}
 
         async def connection(
             reader: asyncio.StreamReader, writer: asyncio.StreamWriter
         ) -> None:
             task = asyncio.current_task()
             assert task is not None
-            handlers.add(task)
-            task.add_done_callback(handlers.discard)
+            handlers[task] = None
+            task.add_done_callback(lambda done: handlers.pop(done, None))
             await self._connection(reader, writer)
 
         server = await asyncio.start_server(connection, "0.0.0.0", self._port)
