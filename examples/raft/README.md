@@ -18,7 +18,7 @@ a run, the way a disk survives a reboot.
 
 The paper's four safety properties hold under every schedule the explorer
 reaches. Liveness is not claimed: a partitioned minority makes no progress,
-and the suite waits in virtual time rather than asserting any bound.
+and the suite waits in virtual time rather than asserting a wall-clock bound.
 
 Each rule that carries the safety argument sits behind its own flag in
 `Safeguards`, so the tests can switch exactly one off and watch the explorer
@@ -35,8 +35,11 @@ would in production: from a request that never comes back.
 
 Checked after every simulated run (`tests/checks.py`) against an ordered
 record of what the nodes observably did — `("leader", name, term, log)` at
-each election, `("apply", name, index, term, command)` at each state-machine
-apply — plus the logs the run ends with:
+each election, `("apply", name, index, term, command, node_term)` at each
+state-machine apply — plus the logs the run ends with. The applier's own
+term rides along because leader completeness needs the term an entry was
+committed under, and the first apply of an index always happens on the
+leader that committed it:
 
 1. **election safety** — at most one leader per term
 2. **log matching** — if two logs hold the same term at an index, they hold
@@ -50,18 +53,19 @@ apply — plus the logs the run ends with:
 
 - Scenario suite: 11 seeded scenarios (elections, replication, RPC framing)
   × 10 seeds each, alongside unit tests for the log, vote and persistence
-  rules — 66 tests in all, green.
+  rules — 63 fast tests plus the slow proofs, green.
 - Campaign: **50,000 seeds** of five-node chaos — three randomized partition
   windows per seed, a process restart after about half of them, 2% message
   drop and 2% duplication throughout, with a client proposing — invariants
   held on every seed. 917.29s (15m17s) with `--simloop-jobs=8` on an M4
   MacBook Air, about 54 seeds a second. The same scenario runs 300 seeds
   sequentially in 27.97s and 2,000 seeds in 36.34s at `--simloop-jobs=8`.
-- Replay stability: each ablation's found-at seed re-explored 100 times on a
-  fresh loop — 5 seeds × 100 replays, one trace hash apiece, byte-identical
-  throughout. The suite keeps re-earning the property:
-  `test_a_found_seed_replays_byte_identically` (slow-marked) finds a failing
-  seed and holds its trace hash across eight fresh replays.
+- Replay stability: a one-off local measurement re-explored each ablation's
+  found-at seed 100 times on a fresh loop — 5 seeds × 100 replays, one trace
+  hash apiece, byte-identical throughout. The standing check is
+  `test_a_found_seed_replays_byte_identically` (slow-marked, so it rides the
+  nightly): it locates a failing seed and holds its trace hash across eight
+  fresh replays.
 - Ablations: remove any load-bearing safeguard and the explorer finds a
   violating schedule within a few seeds.
 
@@ -76,6 +80,13 @@ apply — plus the logs the run ends with:
 Rows 1–4 searched a budget of 300 seeds, row 5 a budget of 500. All five are
 labeled ablations — detection demonstrations, not bugs that were ever
 shipped.
+
+"Invariant violated" records what the found seed actually produced, not the
+only thing that ablation can produce. Three of the five tests deliberately
+accept any genuine violation class: a node that answers superseded terms, for
+instance, takes both stale appends and stale vote grants, so naming one of the
+four claims would say less than letting the checker report which one broke
+first.
 
 Two safeguards are also shown to be load-bearing *on their own*, which is the
 other half of the argument: with the commit gate the only thing standing (the
@@ -129,7 +140,10 @@ take `shrink=True` as an argument.
 ## Run it
 
     uv run pytest examples/raft/tests -q            # fast suite: scenarios, units, ablations
-    uv run pytest examples/raft/tests -q -m slow    # chaos campaign + the two safe proofs
+    uv run pytest examples/raft/tests -q -m slow    # campaign, the two safe proofs, the replay guard
+
+Add `-s` to either and the ablations print the explorer's report — the failing
+seed and the trace around it.
 
 Turn the campaign up and spread the seeds over cores:
 

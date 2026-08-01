@@ -24,6 +24,7 @@ Scenario = Callable[[], Coroutine[Any, Any, None]]
 def _find(scenario: Scenario, budget: int = BUDGET) -> SeedReport:
     report = explore(scenario, range(budget))
     assert report is not None, "ablation went undetected across the seed budget"
+    print(report.render())  # visible under `pytest -s`; the demo's best artifact
     return report
 
 

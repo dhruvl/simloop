@@ -42,7 +42,7 @@ def _state_machine_safety(events: list[Event]) -> None:
     applied: dict[int, tuple[int, str]] = {}
     for event in events:
         if event[0] == "apply":
-            _, name, index, term, command = event
+            _, name, index, term, command, _node_term = event
             first = applied.setdefault(index, (term, command))
             if first != (term, command):
                 raise InvariantViolation(
@@ -54,13 +54,14 @@ def _state_machine_safety(events: list[Event]) -> None:
 
 def _leader_completeness(events: list[Event]) -> None:
     # An entry committed under a term-T leader must appear in the log of
-    # every leader of a term above T. The floor records T at the moment of
-    # the first apply: the committing leader's own election event always
-    # precedes its applies, so the highest leader term seen so far is its
-    # term. Leaders at or below the floor -- stale-term stragglers whose
-    # counted votes predate the commit -- are outside the paper's claim.
+    # every leader of a term above T. The floor is T itself, read straight
+    # off the first apply of the index: a follower only learns an index is
+    # committed from a later append carrying leader_commit, so the first
+    # apply of any index happens on the committing leader, and that event's
+    # node_term is the term it committed under. Leaders at or below the
+    # floor -- stale-term stragglers whose counted votes predate the commit
+    # -- are outside the paper's claim.
     committed: dict[int, tuple[Entry, int]] = {}
-    top_term = 0
     for event in events:
         if event[0] == "leader":
             _, name, term, log = event
@@ -71,10 +72,9 @@ def _leader_completeness(events: list[Event]) -> None:
                         f"term-{term} leader {name} lacks committed "
                         f"entry {index}: {entry}",
                     )
-            top_term = max(top_term, term)
         elif event[0] == "apply":
-            _, _, index, term, command = event
-            committed.setdefault(index, (Entry(term, command), top_term))
+            _, _, index, term, command, node_term = event
+            committed.setdefault(index, (Entry(term, command), node_term))
 
 
 def _log_matching(logs: dict[str, tuple[Entry, ...]]) -> None:

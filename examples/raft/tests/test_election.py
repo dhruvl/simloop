@@ -18,6 +18,7 @@ async def test_a_quiet_cluster_elects_exactly_one_leader() -> None:
     await asyncio.sleep(2.0)
     leaders = [m.name for m in cluster.members.values() if m.node.role == LEADER]
     assert leaders == [leader]
+    harness.verify(cluster)
 
 
 @sim_test
@@ -28,6 +29,7 @@ async def test_a_settled_leader_stays_leader() -> None:
     await asyncio.sleep(5.0)
     assert cluster.members[leader].node.role == LEADER
     assert cluster.members[leader].node.term == term
+    harness.verify(cluster)
 
 
 @sim_test
@@ -41,6 +43,7 @@ async def test_the_cluster_survives_a_leader_restart() -> None:
     assert cluster.members[leader].node.role == LEADER
     # The restart cut the heartbeats, so the survivors must have opened a term.
     assert cluster.members[leader].node.term > before
+    harness.verify(cluster)
 
 
 @sim_test
@@ -55,3 +58,4 @@ async def test_a_partitioned_leader_steps_down_on_heal() -> None:
     loop.net.heal()
     await asyncio.sleep(2.0)
     assert cluster.members[first].node.role != LEADER
+    harness.verify(cluster)

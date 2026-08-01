@@ -169,6 +169,14 @@ async def settle(cluster: Cluster, *, timeout_s: float = 120.0) -> None:
     """Wait (in virtual time) until every live member applied the same sequence."""
     async with asyncio.timeout(timeout_s):
         while True:
+            for member in cluster.members.values():
+                # A node that died of a real bug would otherwise just drop out
+                # of the quorum below and let the rest converge without it.
+                # Reading the result re-raises whatever killed it. Restarts
+                # cancel their task, and a cancelled task has no result to
+                # speak of, so those stay excluded quietly as before.
+                if member.task.done() and not member.task.cancelled():
+                    member.task.result()
             live = [
                 member.node
                 for member in cluster.members.values()
