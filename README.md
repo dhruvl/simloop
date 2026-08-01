@@ -83,30 +83,45 @@ replay: pytest 'tests/test_counter.py::test_two_increments_both_count' --simloop
 
 last 20 trace events:
   [t=1.3944] run      seq=58  SimNetwork._deliver
+  [t=1.3944] net      seq=21  deliver counter>b
+  [t=1.3944] schedule seq=63  b  Task.task_wakeup
+  [t=1.3944] run      seq=63  b  Task.task_wakeup
   [t=1.3944] net      seq=23  send b>counter
   ...
-  [t=1.3944] run      seq=70  SimLoop._stop_when_done
+  [t=1.3944] run      seq=70  driver  SimLoop._stop_when_done
 
-runs agree for 38 events; passing then ran StreamReaderProtocol.connection_made.<locals>.callback, failing ran list.remove
+runs agree for 41 events; passing then ran StreamReaderProtocol.connection_made.<locals>.callback, failing ran list.remove
 passing run:
-  [t=1.0944] schedule seq=13  SimNetwork._deliver
+  [t=1.0944] schedule seq=13  counter  SimNetwork._deliver
   ...
 failing run:
-  [t=1.1224] schedule seq=13  SimNetwork._deliver
+  [t=1.1224] schedule seq=13  counter  SimNetwork._deliver
   ...
 pending tasks by host:
-  counter  Task 'Task-1026'  awaiting serve  at tests/test_counter.py:26
+  counter  Task 'Task-1026'  awaiting serve  at tests/test_counter.py:24
 ```
 
 The report names the failing seed, prints the exact command that replays
 it — same scheduling decisions, same fault decisions, same trace — and
 diffs the failing run against the last passing seed, so the first thing
-the two runs did differently is one line of output. In CI, crank the
-search without touching code:
+the two runs did differently is one line of output. Trace lines name the
+machine whose work they were; the ones naming none are the simulation's own
+— the clock advancing, a packet crossing the wire. In CI, crank the search
+without touching code:
 
 ```
 pytest --simloop-seeds=1000
 ```
+
+Seeds are not the only way to search. `--simloop-policy=pct` schedules by
+priority instead of drawing uniformly — Burckhardt et al.'s PCT (ASPLOS
+2010): every chain of work gets a random priority, the highest ready one
+always runs, and a few randomly placed demotions shuffle the leader. That
+buys a stated probability, on every single run, of hitting a bug that needs
+`--simloop-pct-depth` scheduling constraints met in order. It is a floor,
+not a speed-up: on shallow races uniform draws find the bug sooner, and the
+[contract page](https://github.com/dhruvl/simloop/blob/main/docs/supported-api.md)
+publishes the measurement that says so.
 
 ## Shrink the schedule to the race
 
@@ -152,6 +167,27 @@ FIFO throughout`, that is an answer too — the interleaving never mattered,
 so look at the fault timings, not the task order. Shrinking is off by
 default (it costs extra runs, capped by `--simloop-shrink-budget`, default
 500) and experimental.
+
+## Watch the run that failed
+
+A schedule is easier to read as a picture than as a wall of trace lines:
+
+```
+pytest --simloop-timeline=artifacts
+```
+
+Every failing seed leaves `artifacts/simloop-timeline-seed<N>.html`, named in
+its failure report. The page is self-contained — inline CSS, inline script,
+inline SVG, nothing fetched — so it opens from a CI artifact store or an
+attachment as readily as from disk. It draws one lane per simulated machine
+and one for the simulation itself, virtual time running left to right, a dot
+for every scheduling decision on that machine, and an arrow for every packet
+that crossed. A packet that was sent and never arrived leaves a stub pointing
+nowhere, which is what a drop, a loss and a partition all look like from the
+sender's side; crashes and restarts mark the lane they struck. The last 5,000
+events are drawn, and the page says so when there were more.
+`simloop.timeline_html(events)` renders the same page from any trace you are
+holding.
 
 ## What the simulation gives you
 
@@ -213,8 +249,8 @@ Simulation is cheap: SimLoop schedules a task step in ~4.4 µs (trace
 recording included — about 3.6× faster than the stock loop, which pays a
 selector syscall per iteration), compresses sleep-heavy workloads ~2,000×
 against wall clock, and with `--simloop-jobs` fanning seeds across
-processes, the full jobqueue chaos scenario sweeps 100,000 seeds in six
-minutes (~280 seeds/second) on an M4 MacBook Air. Methodology, numbers,
+processes, the full jobqueue chaos scenario sweeps 100,000 seeds in under
+six minutes (~300 seeds/second) on an M4 MacBook Air. Methodology, numbers,
 and the campaign results:
 [benchmarks/README.md](https://github.com/dhruvl/simloop/blob/main/benchmarks/README.md).
 

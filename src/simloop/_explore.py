@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import functools
 import inspect
+import math
 import os
 from collections.abc import Callable, Coroutine, Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, overload
 
 from simloop._loop import SimLoop
@@ -21,9 +22,28 @@ from simloop._parallel import (
     check_reproduced,
     find_lowest_failure,
 )
+from simloop._policy import PCTPolicy, SchedulingPolicy
 from simloop._run import Workload, finish, run_once
 from simloop._shrink import DEFAULT_BUDGET, ShrinkResult, shrink_schedule
+from simloop._timeline import timeline_html
 from simloop._trace import EventKind, TraceEvent
+
+# How the scheduler may be driven while exploring: seeded uniform draws, or
+# PCT's priorities.
+POLICIES = ("random", "pct")
+# Ordering constraints PCT aims to hit; the paper's own default.
+DEFAULT_PCT_DEPTH = 3
+# The seed whose run measures the workload for PCT. Fixed rather than "the
+# first seed asked for", so that the horizon depends on the workload alone:
+# replaying one found seed on its own has to size the horizon exactly as the
+# search that found it did, or the replay runs a different schedule.
+_CALIBRATION_SEED = 0
+# Room left above the measured step count, so that a run a little longer than
+# the measured one still has change points falling inside it.
+_HORIZON_SLACK = 1.5
+# Below this, a horizon is too small to place change points with any spread,
+# and the measurement is too short to be worth trusting anyway.
+_MIN_HORIZON = 100
 
 # Events of context shown either side of the point two runs part ways.
 _CONTEXT = 5
@@ -71,8 +91,51 @@ class Divergence:
 
 
 @dataclass(frozen=True, slots=True)
+class PolicyRun:
+    """Which scheduler drove one seed, when it was not the loop's own.
+
+    Only ``"pct"`` reaches here today: the default policy is the loop's own
+    seeded draw, and a run under it carries no record at all, so nothing about
+    a default exploration changes.
+
+    ``horizon`` is the step count PCT sized its change points against, and is
+    ``None`` for the seed the measurement is taken from — that seed runs the
+    seeded schedule, because a measurement of a PCT run would be a measurement
+    of a schedule chosen by the number it is supposed to produce.
+    """
+
+    name: str
+    depth: int
+    horizon: int | None = None
+
+    def build(self, seed: int) -> SchedulingPolicy | None:
+        """The policy for ``seed``, or ``None`` to leave the loop's own in place."""
+        if self.horizon is None:
+            return None
+        return PCTPolicy(seed, self.depth, self.horizon)
+
+    def replay_options(self) -> str:
+        """The --simloop-* options a replay of this seed needs to match it."""
+        options = f" --simloop-policy={self.name}"
+        if self.depth != DEFAULT_PCT_DEPTH:
+            options += f" --simloop-pct-depth={self.depth}"
+        return options
+
+
+@dataclass(frozen=True, slots=True)
 class SeedReport:
-    """Everything known about the first failing seed."""
+    """Everything known about the first failing seed.
+
+    ``trace_events`` is the tail the rendered report prints; ``trace`` is
+    every event the failing run recorded, which is what a timeline draws. The
+    tail is a slice of the same run, so the two agree by construction.
+
+    ``trace`` stays out of the repr: it can hold tens of thousands of events,
+    and this object is reachable from a failing test's traceback, where a
+    dataclass repr would print the whole run into the terminal. It is held
+    whether or not a timeline was asked for, so the memory is the failing
+    run's full event list either way.
+    """
 
     seed: int
     seeds_passed: int
@@ -82,16 +145,34 @@ class SeedReport:
     pending: tuple[PendingTask, ...]
     divergence: Divergence | None = None
     shrunk: ShrinkResult | None = None
+    policy: PolicyRun | None = None
+    trace: tuple[TraceEvent, ...] = field(default=(), repr=False)
 
-    def render(self, test_id: str | None = None) -> str:
+    def render(
+        self,
+        test_id: str | None = None,
+        *,
+        timeline: str | None = None,
+        timeline_error: str | None = None,
+    ) -> str:
         lines = [
             f"simloop: failed at seed {self.seed} "
             f"({self.seeds_passed} seeds passed first)"
         ]
         if test_id is not None:
+            options = self.policy.replay_options() if self.policy else ""
             lines.append(
-                f"replay: pytest '{test_id}' --simloop-replay={self.seed}"
+                f"replay: pytest '{test_id}' --simloop-replay={self.seed}{options}"
             )
+        if timeline is not None:
+            lines.append(f"timeline: {timeline}")
+        elif timeline_error is not None:
+            # The page was asked for and could not be written. That is worth
+            # saying, and worth saying here rather than by raising: the
+            # failure this report describes is the one the user is chasing.
+            lines.append(f"timeline not written: {timeline_error}")
+        if self.policy is not None:
+            lines.append(_render_policy(self.policy))
         if self.trace_events:
             lines.append("")
             lines.append(f"last {len(self.trace_events)} trace events:")
@@ -113,10 +194,24 @@ class SeedReport:
 
 
 def _format_event(event: TraceEvent) -> str:
+    # The host goes in a column of its own ahead of the label, the way the
+    # pending-task block names machines. Events that belong to the simulation
+    # rather than to a machine — a clock advance, a packet on the wire — carry
+    # no host and keep the two-space gap they always had.
+    host = f"{event.host}  " if event.host else ""
     return (
         f"  [t={event.when:.4f}] {event.kind:<8} "
-        f"seq={event.seq}  {event.label}"
+        f"seq={event.seq}  {host}{event.label}"
     )
+
+
+def _render_policy(policy: PolicyRun) -> str:
+    if policy.horizon is None:
+        return (
+            f"policy: {policy.name} (depth {policy.depth}); this seed ran the "
+            "default schedule, which is what sized the horizon"
+        )
+    return f"policy: {policy.name} (depth {policy.depth}, horizon {policy.horizon:,})"
 
 
 def _describe(event: TraceEvent | None, subject: str) -> str:
@@ -246,6 +341,8 @@ def explore(
     shrink: bool = False,
     shrink_budget: int = DEFAULT_BUDGET,
     jobs: int = 1,
+    policy: str = "random",
+    pct_depth: int = DEFAULT_PCT_DEPTH,
 ) -> SeedReport | None:
     """Run ``fn`` once per seed on a fresh SimLoop; stop at the first failure.
 
@@ -269,9 +366,35 @@ def explore(
     would have stopped at, rebuilt by re-running that seed here — but the
     workload has to survive pickling to reach a worker at all, so it must be
     a module-level function or a partial of one.
+
+    ``policy="pct"`` schedules by priority instead of drawing uniformly,
+    which buys a per-run probability bound on finding a bug that needs
+    ``pct_depth`` ordering constraints. It costs one extra run of the
+    workload: seed 0 runs the seeded schedule, and its step count is what the
+    priority policy's horizon is sized from. That seed is fixed rather than
+    "whichever seed came first", so the horizon describes the workload alone
+    — which is what lets one found seed, replayed on its own, run the very
+    schedule that found it.
     """
     if jobs < 1:
         raise ValueError("jobs must be at least 1")
+    if policy not in POLICIES:
+        raise ValueError(
+            f"unknown scheduling policy {policy!r}: expected one of "
+            f"{', '.join(repr(name) for name in POLICIES)}"
+        )
+    if policy == "pct":
+        if pct_depth < 1:
+            raise ValueError(f"pct_depth must be at least 1, got {pct_depth}")
+        if jobs > 1:
+            # Refused rather than quietly ignored: seed 0 sizes the horizon in
+            # this process, and the parallel search hands workers a seed and
+            # nothing else, so workers would explore uniformly while the report
+            # claimed PCT.
+            raise ValueError(
+                "policy='pct' explores sequentially, because the horizon it "
+                "sizes here does not reach worker processes: run it with jobs=1"
+            )
     if jobs > 1:
         ordered = list(seeds)
         if len(ordered) > 1:
@@ -286,8 +409,14 @@ def explore(
         # One seed is one run: worth no process pool at all.
         seeds = ordered
     passed = 0
+    horizon: int | None = None
     last_pass: tuple[TraceEvent, ...] = ()
     for seed in seeds:
+        if policy == "pct" and horizon is None and seed != _CALIBRATION_SEED:
+            # Measured on first need rather than up front, so that a caller
+            # who asked for no seeds — or only for the measuring seed, which
+            # measures itself — runs the workload exactly as often as asked.
+            horizon = _pct_horizon(_measure_steps(fn), pct_depth)
         report, events = _run_seed(
             fn,
             seed,
@@ -296,12 +425,58 @@ def explore(
             trace_tail=trace_tail,
             shrink=shrink,
             shrink_budget=shrink_budget,
+            policy=_policy_for(policy, pct_depth, horizon, seed),
         )
         if report is not None:
             return report
         last_pass = events
         passed += 1
     return None
+
+
+def _policy_for(
+    policy: str, depth: int, horizon: int | None, seed: int
+) -> PolicyRun | None:
+    """How ``seed`` should be scheduled, or ``None`` for the loop's own draw."""
+    if policy == "random":
+        return None
+    # The measuring seed keeps the seeded schedule, and says so by carrying no
+    # horizon: it is the run the horizon was read off, and it is explored like
+    # every other seed rather than being spent on measurement alone.
+    return PolicyRun(
+        policy, depth, None if seed == _CALIBRATION_SEED else horizon
+    )
+
+
+def _measure_steps(fn: Workload) -> int:
+    """How many scheduling steps the workload takes under the seeded schedule.
+
+    One run of seed 0, whose outcome is deliberately dropped: this is a
+    measurement, not an exploration, and seed 0 is explored on its own account
+    when it is one of the seeds asked for. The choice log is one entry per
+    step, which is the unit a horizon is counted in; the trace is several
+    events per step and would size the horizon several times too large.
+    """
+    loop = SimLoop(_CALIBRATION_SEED)
+    try:
+        run_once(loop, fn)
+        return len(loop._choices)
+    finally:
+        finish(loop)
+
+
+def _pct_horizon(steps: int, depth: int) -> int:
+    """Size a PCT horizon from a measured step count.
+
+    Slack above the measurement, then a floor, because a horizon shorter than
+    the run leaves its tail at fixed priorities and a horizon of a handful of
+    steps cannot spread change points at all. The last clamp is the one that
+    is not about tuning: PCT needs ``depth - 1`` distinct change points and
+    refuses to be built without room for them, so a deep search of a short
+    workload widens the horizon rather than failing.
+    """
+    horizon = max(math.ceil(steps * _HORIZON_SLACK), _MIN_HORIZON)
+    return max(horizon, depth - 1)
 
 
 def _run_seed(
@@ -313,6 +488,7 @@ def _run_seed(
     trace_tail: int,
     shrink: bool,
     shrink_budget: int,
+    policy: PolicyRun | None = None,
 ) -> tuple[SeedReport | None, tuple[TraceEvent, ...]]:
     """Run one seed; report it if it failed, and hand back its trace either way.
 
@@ -320,6 +496,14 @@ def _run_seed(
     failure gets diffed against.
     """
     loop = SimLoop(seed)
+    if policy is not None:
+        scheduler = policy.build(seed)
+        if scheduler is not None:
+            # Built by the seed, then scheduled by something else: the clock,
+            # the network faults and the user-facing entropy stay exactly what
+            # the seed put there, and only the order of the ready queue moves.
+            # This is the seam SimLoop._from_choices uses for replay.
+            loop._policy = scheduler
     try:
         failure = run_once(loop, fn)
         events = loop.trace
@@ -333,6 +517,8 @@ def _run_seed(
             trace_hash=loop.trace_hash(),
             pending=_pending_tasks(loop),
             divergence=_diff_traces(last_pass, events),
+            policy=policy,
+            trace=events,
         )
         choices = loop._choices
     finally:
@@ -424,6 +610,20 @@ def _pending_tasks(loop: SimLoop) -> tuple[PendingTask, ...]:
     return tuple(found)
 
 
+def write_timeline(report: SeedReport, directory: str) -> str:
+    """Draw the failing seed's trace into ``directory``; return the path.
+
+    One page per failing seed, named after it, so that a session that failed
+    several sim tests at several seeds leaves one artifact per failure rather
+    than one that the last failure overwrote.
+    """
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, f"simloop-timeline-seed{report.seed}.html")
+    with open(path, "w", encoding="utf-8") as page:
+        page.write(timeline_html(report.trace))
+    return _short_path(os.path.abspath(path))
+
+
 def _short_path(filename: str) -> str:
     cwd = os.getcwd()
     if filename.startswith(cwd + os.sep):
@@ -435,10 +635,15 @@ def _short_path(filename: str) -> str:
 class _Overrides:
     """Session state the pytest plugin writes; consulted by sim_test wrappers.
 
-    ``seeds``, ``replay``, ``shrink``, ``shrink_budget`` and ``jobs`` mirror
-    the --simloop-* options; ``node_id`` is the test currently running, so
-    reports can print an exact replay command. The counters feed the
-    plugin's terminal summary.
+    ``seeds``, ``replay``, ``shrink``, ``shrink_budget``, ``jobs``,
+    ``policy``, ``pct_depth`` and ``timeline_dir`` mirror the --simloop-*
+    options; ``node_id`` is the test currently running, so reports can print
+    an exact replay command. The counters feed the plugin's terminal summary.
+
+    ``policy`` and ``pct_depth`` are ``None`` when the option was not given,
+    the way ``seeds`` is: an option nobody passed must leave a decorator's own
+    argument alone, while ``--simloop-policy=random`` is a decision and
+    overrides it.
     """
 
     seeds: int | None = None
@@ -446,6 +651,9 @@ class _Overrides:
     shrink: bool = False
     shrink_budget: int = DEFAULT_BUDGET
     jobs: int = 1
+    policy: str | None = None
+    pct_depth: int | None = None
+    timeline_dir: str | None = None
     node_id: str | None = None
     sim_tests: int = 0
     seeds_explored: int = 0
@@ -488,7 +696,11 @@ def sim_test(fn: _TestFn, /) -> Callable[..., None]: ...
 
 @overload
 def sim_test(
-    *, seeds: int = ..., trace_tail: int = ...
+    *,
+    seeds: int = ...,
+    trace_tail: int = ...,
+    policy: str = ...,
+    pct_depth: int = ...,
 ) -> Callable[[_TestFn], Callable[..., None]]: ...
 
 
@@ -498,6 +710,8 @@ def sim_test(
     *,
     seeds: int = 10,
     trace_tail: int = 20,
+    policy: str = "random",
+    pct_depth: int = DEFAULT_PCT_DEPTH,
 ) -> Callable[..., None] | Callable[[_TestFn], Callable[..., None]]:
     """Turn an ``async def`` test into a seed-exploring synchronous test.
 
@@ -505,11 +719,19 @@ def sim_test(
     :func:`explore` and re-raises the first failure with the rendered
     report attached as an exception note. Under pytest, the --simloop-seeds
     and --simloop-replay options override the decorator's arguments,
-    --simloop-shrink adds a minimized schedule to the report, and
-    --simloop-jobs spreads the seeds over worker processes.
+    --simloop-shrink adds a minimized schedule to the report,
+    --simloop-jobs spreads the seeds over worker processes,
+    --simloop-policy / --simloop-pct-depth override ``policy`` and
+    ``pct_depth``, and --simloop-timeline draws the failing seed's trace to
+    an HTML page named in the report.
     """
     if seeds < 1:
         raise ValueError("seeds must be at least 1")
+    if policy not in POLICIES:
+        raise ValueError(
+            f"unknown scheduling policy {policy!r}: expected one of "
+            f"{', '.join(repr(name) for name in POLICIES)}"
+        )
 
     def decorate(test_fn: _TestFn) -> Callable[..., None]:
         @functools.wraps(test_fn)
@@ -535,13 +757,31 @@ def sim_test(
                 shrink=overrides.shrink,
                 shrink_budget=overrides.shrink_budget,
                 jobs=jobs,
+                policy=policy if overrides.policy is None else overrides.policy,
+                pct_depth=(
+                    pct_depth if overrides.pct_depth is None else overrides.pct_depth
+                ),
             )
             overrides.sim_tests += 1
             if report is None:
                 overrides.seeds_explored += len(seed_set)
                 return
             overrides.seeds_explored += report.seeds_passed + 1
-            report.exception.add_note(report.render(overrides.node_id))
+            timeline, timeline_error = None, None
+            if overrides.timeline_dir is not None:
+                try:
+                    timeline = write_timeline(report, overrides.timeline_dir)
+                except OSError as unwritable:
+                    # A drawing that cannot be saved must not cost the user
+                    # the report of the failure it was drawing.
+                    timeline_error = str(unwritable)
+            report.exception.add_note(
+                report.render(
+                    overrides.node_id,
+                    timeline=timeline,
+                    timeline_error=timeline_error,
+                )
+            )
             raise report.exception
 
         return wrapper

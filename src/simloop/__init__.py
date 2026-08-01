@@ -4,6 +4,7 @@ from simloop._explore import SeedReport, explore, sim_test
 from simloop._loop import SimLoop, SimulationDeadlockError, SimulationFenceError
 from simloop._net import Host, SimDisk, SimNetwork
 from simloop._sim import Sim, sim
+from simloop._timeline import timeline_html
 from simloop._trace import TraceEvent
 
 __version__ = "0.1.0"
@@ -22,4 +23,5 @@ __all__ = [
     "explore",
     "sim",
     "sim_test",
+    "timeline_html",
 ]

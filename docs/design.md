@@ -99,10 +99,11 @@ properties are load-bearing:
 - **Completeness.** Even a *cancelled* handle's draw is recorded — the draw
   consumed PRNG state, so it is a scheduling decision, and a replay that made
   a different set of draws must produce a different hash.
-- **Injectivity.** Events serialize as `kind|when|seq|label` lines into a
+- **Injectivity.** Events serialize as `kind|when|seq|host|label` lines into a
   SHA-256. Labels are qualified callback names or network labels built from
-  validated host names, and host names may not contain `|`, `>` or newline —
-  so two distinct event streams cannot collide onto one byte sequence.
+  validated host names, the host field is a validated host name itself, and
+  host names may not contain `|`, `>` or newline — so two distinct event
+  streams cannot collide onto one byte sequence.
 
 Hash equality is therefore a cheap, sufficient check that a replay was
 *exact*, not merely same-outcome. It is asserted all over the test suite and
@@ -258,15 +259,25 @@ ten lines of task startup.
 
 **The policy seam.** The loop has exactly one ordering decision — which
 ready callback runs next — and it now flows through a policy object: seeded
-draws by default (byte-identical to owning the PRNG directly, held to that
-by the determinism suite), or a scripted replay of a recorded choice list.
-The recording makes a schedule *editable* where the seed only made it
-*repeatable*: a seed is a name for one schedule, but a choice list can be
-truncated, blanked to FIFO, or perturbed one decision at a time. Scripted
-runs tolerate drift on purpose — an out-of-range choice clamps, an
-exhausted recording falls back to FIFO — because an edited schedule that
-crashes the replayer answers nothing, while one that runs to a verdict
-answers the only question shrinking asks.
+draws by default (making the same draws the loop made when it owned the PRNG
+directly, held to that by the determinism suite), or a scripted replay of a
+recorded choice list. The recording makes a schedule *editable* where the
+seed only made it *repeatable*: a seed is a name for one schedule, but a
+choice list can be truncated, blanked to FIFO, or perturbed one decision at
+a time. Scripted runs tolerate drift on purpose — an out-of-range choice
+clamps, an exhausted recording falls back to FIFO — because an edited
+schedule that crashes the replayer answers nothing, while one that runs to a
+verdict answers the only question shrinking asks.
+
+The seam later grew a third policy and a wider view to feed it. Policies are
+handed the ready queue as `(owner, label)` views rather than a count, which
+is what a priority scheduler needs and what the two original policies still
+ignore; on top of that sits PCT (Burckhardt et al., ASPLOS 2010), reached by
+`--simloop-policy=pct`, which prices each chain of work with a random
+priority and demotes the leader at a few random steps to buy a stated per-run
+probability of hitting a bug of a given ordering depth. The contract page
+carries the guarantee, the calibration story and the measurement showing it
+is a floor rather than a faster search.
 
 **Shrinking is delta debugging over choices, judged by the exception.**
 Three passes, cheapest first: truncate the recording past the failure
@@ -302,7 +313,9 @@ so SimLoop schedules a task step in ~4.4 µs where the stock macOS loop
 spends ~16 µs — about half of that inside the per-iteration `kqueue` call —
 making the simulation roughly 3.6× faster per step *including* trace
 recording. Sleep-heavy workloads compress ~2,000× against wall clock, and
-the full jobqueue chaos scenario explores ~55 seeds/second on a laptop.
+the full jobqueue chaos scenario explores ~52 seeds/second in one process on
+a laptop — down from ~55 in 0.1.0, which is what the per-delivery trace
+events a timeline draws from cost a network-heavy workload.
 The trio thread priced deterministic scheduling at ~15% overhead; replacing
 the loop instead of instrumenting it turned the overhead negative.
 

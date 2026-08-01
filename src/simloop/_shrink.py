@@ -22,7 +22,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
 from simloop._loop import SimLoop
-from simloop._policy import SchedulingPolicy
+from simloop._policy import ReadyView, SchedulingPolicy
 from simloop._run import Workload, finish, run_once
 from simloop._trace import TraceRecorder
 
@@ -299,7 +299,7 @@ class _StepMarks:
         self.diverged_at: int | None = None
         self.at: list[int] = []
 
-    def choose(self, ready: int) -> int:
+    def choose(self, ready: Sequence[ReadyView]) -> int:
         self.at.append(len(self._recorder))
         choice = self._inner.choose(ready)
         self.diverged_at = self._inner.diverged_at

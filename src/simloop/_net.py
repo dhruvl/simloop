@@ -12,7 +12,7 @@ from __future__ import annotations
 import random
 import socket
 from collections.abc import Iterable, Iterator, MutableMapping
-from contextvars import ContextVar
+from contextvars import Context, ContextVar, copy_context
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -24,6 +24,13 @@ if TYPE_CHECKING:
     from simloop._loop import SimLoop
 
 DRIVER = "driver"
+
+# What runs under no machine at all: the network's own delivery step, which
+# belongs to the wire between two hosts rather than to either of them. No
+# registered host can be named this (``SimNetwork.host`` rejects an empty
+# name), so it can never be confused with one, and it is exactly what an empty
+# host field means in the trace.
+WIRE = ""
 
 _current_host: ContextVar[str] = ContextVar("simloop_current_host", default=DRIVER)
 
@@ -53,6 +60,23 @@ _AddrInfo = tuple[int, int, int, str, tuple[str, int]]
 def _format_address(index: int) -> str:
     packed = _ADDRESS_BASE + index
     return ".".join(str((packed >> shift) & 0xFF) for shift in (24, 16, 8, 0))
+
+
+def _wire_context() -> Context:
+    """A context in which no machine owns the running callback.
+
+    A delivery is scheduled by whichever machine sent the packet, so a handle
+    left to copy the ambient context would make the trace read as if the
+    sender ran the delivery step. It did not: crossing the wire is the
+    simulation's work, and ``_deliver`` pins the *receiving* host itself before
+    handing the packet up. Everything else the caller's context carries is
+    copied through untouched.
+    """
+    token = _current_host.set(WIRE)
+    try:
+        return copy_context()
+    finally:
+        _current_host.reset(token)
 
 
 def _gaierror(what: Any) -> socket.gaierror:
@@ -549,7 +573,10 @@ class SimNetwork:
     def _schedule(self, packet: _Packet, latency: tuple[float, float]) -> None:
         self._trace("send", packet)
         delay = self._rng.uniform(latency[0], latency[1])
-        self._loop.call_later(delay, self._deliver, packet)
+        # The schedule event still names the sender — call_later reads the live
+        # context, which the wire context is built and discarded around — while
+        # the delivery step itself is attributed to no machine.
+        self._loop.call_later(delay, self._deliver, packet, context=_wire_context())
 
     def _deliver(self, packet: _Packet) -> None:
         if not (self._alive[packet.src] and self._alive[packet.dst]):
@@ -559,6 +586,12 @@ class SimNetwork:
             # The cut appeared while this packet was in flight.
             self._blackhole(packet)
             return
+        # The packet reached the destination machine: every "send" that is not
+        # answered by a drop, hold or loss is answered by exactly this, which
+        # is what turns the packet log into a set of arrows with two ends.
+        # What the machine then does with it — hand it to a socket, discard it
+        # for want of one, hold it for an earlier sequence — is its own affair.
+        self._trace("deliver", packet)
         # Anything the receiving protocol schedules (including tasks spawned
         # from connection_made or datagram_received) must be pinned to the
         # receiving host, not to whichever context sent the packet.
