@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import select
 import socket
 from typing import Any
 
@@ -45,7 +46,8 @@ def _connected_pair(loop: SimLoop, handler: Any = _hold_open) -> tuple[Any, Any]
         await loop.net.host("client").create_task(connect())
         return writer_box[0], server
 
-    return loop.run_until_complete(main())
+    pair: tuple[Any, Any] = loop.run_until_complete(main())
+    return pair
 
 
 def test_stream_transport_exposes_a_socket_object() -> None:
@@ -107,4 +109,94 @@ def test_datagram_transports_still_answer_none() -> None:
             transport.close()
 
     assert loop.run_until_complete(main()) is None
+    loop.close()
+
+
+def _readable(fd: int) -> bool:
+    """The exact check httpcore's is_socket_readable performs."""
+    if fd < 0:
+        return True
+    rready, _, _ = select.select([fd], [], [], 0)
+    return bool(rready)
+
+
+def test_fileno_is_lazy_and_not_readable_while_live() -> None:
+    loop = _network()
+    writer, server = _connected_pair(loop)
+    sock = writer.transport.get_extra_info("socket")
+    assert sock._park is None  # no kernel object until someone asks
+    fd = sock.fileno()
+    assert fd >= 0
+    assert fd == sock.fileno()  # stable
+    assert not _readable(fd)  # live connection: httpcore keeps pooling it
+    server.close()
+    writer.close()
+    loop.run_until_complete(asyncio.sleep(1.0))
+    loop.close()
+
+
+def test_fd_turns_readable_when_the_peer_closes() -> None:
+    loop = _network()
+
+    async def close_after_a_beat(
+        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        await asyncio.sleep(0.5)  # after the client has taken its fd
+        writer.close()
+
+    writer, server = _connected_pair(loop, close_after_a_beat)
+    sock = writer.transport.get_extra_info("socket")
+    fd = sock.fileno()
+    assert not _readable(fd)
+    # Let the FIN cross the simulated network.
+    loop.run_until_complete(asyncio.sleep(1.0))
+    assert _readable(fd)  # httpcore now sees the connection as expired
+    server.close()
+    writer.close()
+    loop.run_until_complete(asyncio.sleep(1.0))
+    loop.close()
+
+
+def test_fd_born_readable_when_the_peer_left_first() -> None:
+    """A FIN can land before anyone asks for the socket."""
+    loop = _network()
+
+    async def close_immediately(
+        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        writer.close()
+
+    writer, server = _connected_pair(loop, close_immediately)
+    loop.run_until_complete(asyncio.sleep(1.0))  # FIN already delivered
+    sock = writer.transport.get_extra_info("socket")
+    assert _readable(sock.fileno())  # never claim a dead connection is live
+    server.close()
+    writer.close()
+    loop.run_until_complete(asyncio.sleep(1.0))
+    loop.close()
+
+
+def test_fd_lifecycle_ends_with_the_transport() -> None:
+    loop = _network()
+    writer, server = _connected_pair(loop)
+    sock = writer.transport.get_extra_info("socket")
+    fd = sock.fileno()
+    assert not _readable(fd)
+    writer.close()
+    loop.run_until_complete(asyncio.sleep(1.0))
+    assert sock._park is None  # both ends closed, nothing leaked
+    assert sock.fileno() == -1  # closed-socket semantics
+    server.close()
+    loop.close()
+
+
+def test_fileno_after_teardown_never_creates_a_descriptor() -> None:
+    loop = _network()
+    writer, server = _connected_pair(loop)
+    sock = writer.transport.get_extra_info("socket")
+    writer.close()
+    loop.run_until_complete(asyncio.sleep(1.0))
+    assert sock.fileno() == -1
+    assert sock._park is None
+    server.close()
     loop.close()
