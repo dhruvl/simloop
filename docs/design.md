@@ -313,8 +313,9 @@ so SimLoop schedules a task step in ~4.4 µs where the stock macOS loop
 spends ~16 µs — about half of that inside the per-iteration `kqueue` call —
 making the simulation roughly 3.6× faster per step *including* trace
 recording. Sleep-heavy workloads compress ~2,000× against wall clock, and
-the full jobqueue chaos scenario explores ~59 seeds/second in one process on
-a laptop.
+the full jobqueue chaos scenario explores ~52 seeds/second in one process on
+a laptop — down from ~59 in 0.1.0, which is what the per-delivery trace
+events a timeline draws from cost a network-heavy workload.
 The trio thread priced deterministic scheduling at ~15% overhead; replacing
 the loop instead of instrumenting it turned the overhead negative.
 

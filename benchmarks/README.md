@@ -4,7 +4,8 @@ Three numbers matter for a simulation harness: what the simulated loop costs
 per scheduling step, how much simulated time it covers per wall-clock second,
 and how fast the explorer burns through seeds on a real test. Measured on a
 MacBook Air (Apple M4, 16 GB), macOS, CPython 3.12.13. Every number is the
-median of 5 runs after one warmup run, on an otherwise idle machine. Rerun
+median of at least 5 runs after one warmup run, on an otherwise idle
+machine. Rerun
 them with the commands below; expect the ratios, not the absolute times, to
 transfer to other machines.
 
@@ -68,8 +69,16 @@ The jobqueue chaos campaign runs one full distributed scenario per seed —
 a broker, 3 workers, and 2 clients submitting 8 jobs (some poisoned) under
 randomized partitions and a worker crash, then settles for up to 600
 simulated seconds and checks every invariant. 300 seeds complete in
-**5.0–5.2 s**, about **59 seeds/second**, in one process. A thousand-seed
-overnight search is a 17-second coffee break.
+**5.3–6.3 s** across nine runs (median 5.8 s), about **52 seeds/second**,
+in one process. A thousand-seed overnight search is a 19-second coffee
+break.
+
+That is slower than the ~59 seeds/second published for 0.1.0, and the cost
+is a feature: 0.2.0 records a trace event for every packet delivery, not
+just for every send, which is what lets a timeline draw both ends of a
+crossing — and a scenario this network-heavy pays for the extra events
+directly. The wire is where this benchmark spends its time, which is why
+it is the number that moved.
 
 ## Campaigns
 
