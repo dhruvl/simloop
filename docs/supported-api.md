@@ -92,3 +92,132 @@ stays fenced outright: `sock_recv`, `sock_recv_into`, `sock_sendall`,
 `sock_sendto`, `sock_recvfrom`, `sock_recvfrom_into`, `sock_accept` and
 `sock_sendfile`. Client stacks do not need them: the socket they connect
 is upgraded into a transport instead of being read and written directly.
+
+## The trace
+
+Every scheduling decision and every network verdict is appended to a trace
+whose SHA-256 is what proves a replay was exact. `simloop.TraceEvent` is a
+`NamedTuple`, so an event compares and unpacks as `(kind, when, seq, label,
+host)`:
+
+| field | what it holds |
+|---|---|
+| `kind` | `schedule`, `run`, `cancel`, `advance` or `net` |
+| `when` | virtual time, always on the true clock — `set_clock` changes what a host reads, never what a trace records |
+| `seq` | the scheduled handle's number; the packet's uid on a `net` event; `-1` on a clock advance |
+| `label` | the qualified callback name, or a network verb and the link it crossed (`send a>b`) |
+| `host` | the machine the event belongs to, or `""` for the simulation itself |
+
+A `schedule` event names the host that *asked* for the callback, while `run`
+and `cancel` name the host the callback belongs to. The difference is the
+point: a wakeup that crosses machines is a `schedule` on one host and a `run`
+on another. An empty host means the event belongs to the simulation rather
+than to any machine — a clock advance, which is global; the network's own
+delivery step, which happens on the wire between two machines rather than on
+either of them; and every `net` event, whose label already says which
+machines it concerns.
+
+`send` is a packet going onto the wire and `deliver` is that same packet
+arriving. Both carry the packet's uid in `seq`, so the two ends of one
+crossing pair up. The other verbs are usually what happened instead: `drop` (a
+lossy link, or a datagram meeting a partition), `hold` and `release` (a stream
+packet parked by a partition, then put back on the wire when it heals), `dup`
+(a duplicate on its way as well, under the same uid), and `lost` (it reached a
+machine that was gone, or a port with nothing bound). "Usually", because the
+second kind of loss follows a `deliver` rather than replacing it: the packet
+did reach the machine, and only then found nothing to take it. `crash` and
+`restart` name a machine instead of a link.
+
+Hashes are comparable within a version, not across versions: the host field
+and the `deliver` events are new in 0.2.0, so every workload's trace hashes
+differ from the ones 0.1.0 recorded — see the
+[changelog](../CHANGELOG.md). What a hash promises is unchanged: same seed,
+same code, same interpreter, same hash.
+
+`simloop.timeline_html(events, limit=5000)` renders a trace as a
+self-contained HTML page — one lane per machine plus one for the simulation,
+a dot per scheduling decision, an arrow for every `send` its `deliver`
+answered, and a stub for every one that never arrived. Only the last `limit`
+events are drawn, and the page says so when it dropped any; `limit=None`
+draws the whole run.
+
+## Exploring schedules
+
+`@sim_test(seeds=N)` and `simloop.explore(fn, seeds)` run a workload once per
+seed on a fresh loop and stop at the first failure. Under pytest these
+options override what the decorator asked for:
+
+| option | effect |
+|---|---|
+| `--simloop-seeds=N` | run every `@sim_test` under seeds 0..N-1 |
+| `--simloop-replay=SEED` | run every `@sim_test` at exactly this seed |
+| `--simloop-jobs=N` | spread a test's seeds over N worker processes; the workload has to pickle |
+| `--simloop-shrink`, `--simloop-shrink-budget=N` | minimize the failing schedule toward FIFO (experimental, costs runs) |
+| `--simloop-policy=random\|pct` | how the scheduler picks the next ready callback |
+| `--simloop-pct-depth=N` | ordering constraints PCT aims to hit (default 3) |
+| `--simloop-timeline[=DIR]` | draw each failing seed's trace to `simloop-timeline-seed<N>.html`, in `DIR` if given and where pytest was invoked otherwise |
+
+The timeline is written per failing seed and named in the failure report. A
+page that cannot be written says so in the report rather than replacing the
+failure with its own.
+
+### Scheduling policies
+
+`random`, the default, is one seeded uniform draw over the ready queue per
+step: the schedule the seed names, and the only policy a report says nothing
+about.
+
+`pct` schedules by priority instead, after Burckhardt et al., *A Randomized
+Scheduler with Probabilistic Guarantees of Finding Bugs* (ASPLOS 2010). Every
+chain of work draws a distinct random priority, the highest-priority ready
+entry always runs, and at `depth - 1` randomly chosen steps the running chain
+is demoted below every chain still holding its first draw. What that buys is
+a floor: a bug that needs `depth` scheduling constraints met in order is hit
+with probability at least 1/(n · horizon^(depth-1)) on *every* run, where n
+is the number of chains and the horizon is the step count the change points
+are spread over. Chains are priced as they turn up — an owner nobody has seen
+draws its priority on first sight, the standard adaptation for work created
+while the run is going — so n is however many chains the run ended up
+containing, not a count anyone knew in advance, and where tasks spawn tasks
+the bound is best read per run and after the fact. Uniform draws promise
+nothing at any depth.
+
+It is not a faster search, and the repository measures its own claim. On the
+planted lost-update race in `tests/test_explore.py` — two ordering
+constraints in a twelve-step run, searched at the default depth — uniform
+draws reached the first failing seed after 2.0 seeds on average and PCT after
+92.75, a failure rate of 474 seeds per 1,000 against 21. A shallow race in a
+short run is the shape a uniform draw is already ideal for. PCT is for the
+depth a uniform draw is unlikely to stumble into, and what it offers there is
+the bound, not a speed-up.
+
+The rest of the honest print:
+
+- The guarantee is per run. Nothing here says how many runs a campaign needs,
+  and a lower bound on a probability is not a promise that a search finds
+  anything.
+- `depth` is a guess about a bug nobody has seen yet. Too low and the change
+  points cannot express the interleaving; too high and they spread thinner
+  over the same run.
+- The horizon is measured rather than assumed: seed 0 runs once under the
+  seeded schedule, and its step count times 1.5 — floored at 100, and widened
+  further if `depth - 1` change points need the room — is the horizon. That
+  measuring run is one extra run of the workload per exploration, unless seed
+  0 is the only seed asked for: it runs the seeded schedule anyway, so there
+  is nothing left to size. Seed 0 is also explored on its own account, always
+  under the seeded schedule, because measuring a PCT run would measure the
+  number it is supposed to produce; the report says so when the failing seed
+  is that one.
+- Fixing the calibration seed at 0 is what keeps a found seed replayable:
+  replaying it alone measures the same horizon, so it runs the same schedule.
+- A run that ends before the horizon passes only some of its change points; a
+  run that overruns spends all of them in its first `horizon` steps and
+  finishes at fixed priorities. Both are legal schedules, and neither is the
+  one the bound describes.
+- Callbacks no task owns — timers, protocol callbacks — are each a chain of
+  their own that draws once and runs once. A change point landing on one
+  spends a demotion on a chain with no future, so read the bound as a
+  statement about runs where task chains do the deciding.
+- PCT explores sequentially. The horizon is measured in the process that
+  explores and never reaches a worker, so `--simloop-policy=pct` together
+  with `--simloop-jobs` above 1 is refused rather than quietly ignored.

@@ -25,16 +25,17 @@ hand-off — no I/O, no timers.
 
 SimLoop comes out about **3.6× faster per scheduling step**, trace recording
 included, and the ratio holds from 10×2000 to 500×200 task/round shapes
-(0.26–0.29× across the sweep). That is not because simloop is a faster event
-loop in any general sense — it is because a simulated loop never touches the
-OS. Profiling the stock run shows about half its time inside
-`select.kqueue.control`: the real loop pays a selector syscall on every
-iteration even when no I/O is pending, while SimLoop's iteration is pure
-Python — pop the PRNG-chosen callback, run it, append a trace event. The
-practical reading: replayable scheduling costs nothing at test time. (For
-contrast, trio's experimental deterministic-scheduling hook measured ~15%
-overhead on top of its normal loop — python-trio/trio#890; simloop sidesteps
-the comparison by replacing the loop instead of instrumenting it.)
+(0.26–0.30× across the sweep, widening with the task count). That is not
+because simloop is a faster event loop in any general sense — it is because a
+simulated loop never touches the OS. Profiling the stock run shows about half
+its time inside `select.kqueue.control`: the real loop pays a selector
+syscall on every iteration even when no I/O is pending, while SimLoop's
+iteration is pure Python — pop the PRNG-chosen callback, run it, append a
+trace event. The practical reading: replayable scheduling costs nothing at
+test time. (For contrast, trio's experimental deterministic-scheduling hook
+measured ~15% overhead on top of its normal loop — python-trio/trio#890;
+simloop sidesteps the comparison by replacing the loop instead of
+instrumenting it.)
 
 The stock-loop baseline is macOS/kqueue; an epoll or io_uring machine will
 price the syscall differently.
@@ -51,7 +52,7 @@ of simulated time:
 
 | simulated | wall | compression |
 |---|---|---|
-| 7164 s (1.99 h) | 3.55 s | **~2,000×** |
+| 7164 s (1.99 h) | 3.60 s | **~2,000×** |
 
 Virtual time never sleeps: between timers the clock jumps, so a suite full of
 `await asyncio.sleep(300)` costs only its callback processing. This is what
@@ -67,8 +68,8 @@ The jobqueue chaos campaign runs one full distributed scenario per seed —
 a broker, 3 workers, and 2 clients submitting 8 jobs (some poisoned) under
 randomized partitions and a worker crash, then settles for up to 600
 simulated seconds and checks every invariant. 300 seeds complete in
-**5.4–6.0 s**, about **55 seeds/second**. A thousand-seed overnight search is
-a 20-second coffee break.
+**5.0–5.2 s**, about **59 seeds/second**, in one process. A thousand-seed
+overnight search is a 17-second coffee break.
 
 ## Campaigns
 
@@ -109,9 +110,9 @@ Results, recorded 2026-08-01 on the M4 MacBook Air (10 jobs):
 
 | campaign | scale | result |
 |---|---|---|
-| green | 100,000 seeds, 6.0 min, 279.6 seeds/s | green — no invariant violated |
-| ablations | 6 mutations × 10,000 seeds, 2.6 min | every ablation caught, densities below |
-| replay stability | 20 failing seeds × 100 re-runs | identical trace hash on every run |
+| green | 100,000 seeds, 5.6 min, 300.1 seeds/s | green — no invariant violated |
+| ablations | 6 mutations × 10,000 seeds, 2.5 min | every ablation caught, densities below |
+| replay stability | 20 failing seeds × 100 re-runs, 13.5 s | identical trace hash on every run |
 
 Per-ablation failure density:
 
