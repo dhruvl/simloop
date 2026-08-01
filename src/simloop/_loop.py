@@ -8,11 +8,12 @@ import heapq
 import random
 import socket
 import sys
+import weakref
 from array import array
 from asyncio import events
 from collections.abc import Callable, Iterable, Sequence
 from contextvars import Context
-from typing import TYPE_CHECKING, Any, NoReturn, TypeVarTuple, Unpack
+from typing import TYPE_CHECKING, Any, NoReturn, TypeVarTuple, Unpack, overload
 
 if TYPE_CHECKING:
     from asyncio.events import _TaskFactory
@@ -21,6 +22,7 @@ from simloop._net import DRIVER, SimNetwork, _current_host
 from simloop._policy import (
     CHOICE_TYPECODE,
     MAX_CHOICE,
+    ReadyView,
     SchedulingPolicy,
     ScriptedPolicy,
     SeededPolicy,
@@ -89,6 +91,70 @@ def _host_of(handle: asyncio.Handle) -> str:
     return host
 
 
+# What the loop remembers about one runnable callback: its seq, the label the
+# trace records, the handle that runs it, and the callback itself — kept
+# because that is where a task step says which task it belongs to, and a
+# handle's callback is private to asyncio.
+_ReadyEntry = tuple[int, str, asyncio.Handle, Callable[..., object]]
+
+
+class _ReadyViews(Sequence[ReadyView]):
+    """The ready queue as a policy sees it, named only where it looks.
+
+    Naming the owner of a callback costs a lookup, and the two policies that
+    ship with simloop — the seeded default and the scripted replay — decide
+    on the length of the queue alone. So nothing is built up front: ``len``
+    is the queue's length and only an entry that is actually indexed pays for
+    its view. A policy that reads every entry, as a priority policy does,
+    pays exactly what an eagerly built list would have cost.
+
+    One instance serves the whole loop, over the live ready queue rather than
+    a copy, so a step costs no allocation at all. The consequence is that the
+    sequence describes the queue *now*: it is meant to be read inside
+    ``choose`` and is not a snapshot to keep.
+
+    Views are recomputed rather than cached, which is safe because computing
+    one has no side effect — the owner numbers are handed out in
+    ``create_task``, long before anything here looks at them — so indexing an
+    entry twice simply returns equal tuples.
+    """
+
+    __slots__ = ("_entries", "_owners")
+
+    def __init__(
+        self,
+        entries: list[_ReadyEntry],
+        owners: weakref.WeakKeyDictionary[asyncio.Task[Any], int],
+    ) -> None:
+        self._entries = entries
+        self._owners = owners
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    @overload
+    def __getitem__(self, index: int) -> ReadyView: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> Sequence[ReadyView]: ...
+
+    def __getitem__(self, index: int | slice) -> ReadyView | Sequence[ReadyView]:
+        if isinstance(index, slice):
+            return [self[position] for position in range(*index.indices(len(self)))]
+        seq, label, _, callback = self._entries[index]
+        # A task drives every one of its steps through ``call_soon``, and the
+        # callback it passes is bound to the task, so ``__self__`` is where a
+        # step says whose work it is. Anything no task owns is named by its
+        # own seq, negated so the two kinds can never be confused and no two
+        # unowned callbacks ever share a number.
+        task = getattr(callback, "__self__", None)
+        if isinstance(task, asyncio.Task):
+            owner = self._owners.get(task)
+            if owner is not None:
+                return (owner, label)
+        return (-1 - seq, label)
+
+
 class SimLoop(asyncio.AbstractEventLoop):
     """An event loop where time is virtual and execution order is seeded.
 
@@ -119,13 +185,29 @@ class SimLoop(asyncio.AbstractEventLoop):
         self._user_random = random.Random(f"{seed}:random")
         self._uuid_random = random.Random(f"{seed}:uuid")
         self._now = 0.0
-        # Ready entries are (seq, label, handle); seq is a global creation
-        # counter that gives every scheduled callback a stable identity.
-        self._ready: list[tuple[int, str, asyncio.Handle]] = []
-        # Timer heap entries are (when, seq, label, handle). seq breaks ties
-        # between equal deadlines, so handles themselves are never compared.
-        self._timers: list[tuple[float, int, str, asyncio.TimerHandle]] = []
+        # Ready entries are (seq, label, handle, callback); seq is a global
+        # creation counter that gives every scheduled callback a stable
+        # identity.
+        self._ready: list[_ReadyEntry] = []
+        # Timer heap entries are (when, seq, label, handle, callback). seq
+        # breaks ties between equal deadlines, so nothing after it — handles
+        # and callbacks above all — is ever compared.
+        self._timers: list[
+            tuple[float, int, str, asyncio.TimerHandle, Callable[..., object]]
+        ] = []
         self._next_seq = 0
+        # Which task each of this loop's tasks is, as a number a policy can
+        # compare: creation order, counted per loop so it is a property of
+        # the run and not of the process. Weakly keyed because a long
+        # campaign creates tasks by the million and this map must never be
+        # the reason one of them stays alive.
+        self._task_owners: weakref.WeakKeyDictionary[asyncio.Task[Any], int] = (
+            weakref.WeakKeyDictionary()
+        )
+        self._next_owner = 0
+        # Built once and reused: it reads the queue in place, so handing it
+        # to the policy on every step costs nothing.
+        self._ready_views = _ReadyViews(self._ready, self._task_owners)
         self._recorder = TraceRecorder()
         self._running = False
         self._closed = False
@@ -227,7 +309,7 @@ class SimLoop(asyncio.AbstractEventLoop):
         seq = self._next_seq
         self._next_seq += 1
         label = _label(callback)
-        self._ready.append((seq, label, handle))
+        self._ready.append((seq, label, handle, callback))
         # A schedule event names the host that *asked* for the callback, which
         # is not always the one that will run it: that difference is exactly
         # how a wakeup crossing machines shows up in the trace.
@@ -288,7 +370,7 @@ class SimLoop(asyncio.AbstractEventLoop):
         seq = self._next_seq
         self._next_seq += 1
         label = _label(callback)
-        heapq.heappush(self._timers, (when, seq, label, timer))
+        heapq.heappush(self._timers, (when, seq, label, timer, callback))
         self._recorder.record("schedule", self._now, seq, label, _current_host.get())
         return timer
 
@@ -298,10 +380,15 @@ class SimLoop(asyncio.AbstractEventLoop):
         # The one ordering decision in the whole loop, and the policy owns it:
         # every scheduling decision flows through this call, which is seeded
         # by default and scriptable for replay.
-        index = self._policy.choose(len(self._ready))
+        #
+        # This is the hottest call in the package, and the sequence handed
+        # over is a standing view of the ready queue rather than a list built
+        # here, so a policy that decides on the count alone — the default one
+        # does — costs a step nothing at all.
+        index = self._policy.choose(self._ready_views)
         assert index <= MAX_CHOICE, "ready queue outgrew the choice log"
         self._choice_log.append(index)
-        seq, label, handle = self._ready.pop(index)
+        seq, label, handle, _ = self._ready.pop(index)
         host = _host_of(handle)
         if handle.cancelled():
             # The draw itself is a scheduling decision, so a skipped handle
@@ -313,7 +400,7 @@ class SimLoop(asyncio.AbstractEventLoop):
 
     def _advance_clock(self) -> None:
         while self._timers and self._timers[0][3].cancelled():
-            _, seq, label, timer = heapq.heappop(self._timers)
+            _, seq, label, timer, _ = heapq.heappop(self._timers)
             self._recorder.record("cancel", self._now, seq, label, _host_of(timer))
         if not self._timers:
             raise SimulationDeadlockError(
@@ -322,11 +409,11 @@ class SimLoop(asyncio.AbstractEventLoop):
         self._now = max(self._now, self._timers[0][0])
         self._recorder.record("advance", self._now, -1, "")
         while self._timers and self._timers[0][0] <= self._now:
-            _, seq, label, timer = heapq.heappop(self._timers)
+            _, seq, label, timer, callback = heapq.heappop(self._timers)
             if timer.cancelled():
                 self._recorder.record("cancel", self._now, seq, label, _host_of(timer))
             else:
-                self._ready.append((seq, label, timer))
+                self._ready.append((seq, label, timer, callback))
 
     # ------------------------------------------------------------------
     # Running
@@ -444,8 +531,23 @@ class SimLoop(asyncio.AbstractEventLoop):
                 set_name = getattr(task, "set_name", None)
                 if set_name is not None:
                     set_name(name)
+        # The task queued its own first step from its constructor, but no
+        # policy can have looked at the ready queue since — the loop is not
+        # running here — so numbering it now still names that first step.
+        self._task_owners[task] = self._next_owner
+        self._next_owner += 1
         self._net._register_task(task)
         return task
+
+    def _task_owner(self, task: asyncio.Task[Any]) -> int:
+        """Which task this is, counted in creation order on this loop.
+
+        The number a policy sees in the ready view of every step ``task``
+        takes. Only tasks this loop created have one: a bare
+        ``asyncio.Task(coro)`` never passes through here, and its steps are
+        named individually instead, as any other unowned callback is.
+        """
+        return self._task_owners[task]
 
     async def create_datagram_endpoint(
         self,

@@ -1,11 +1,22 @@
 import asyncio
+import gc
 import random
-from collections.abc import Callable
+import weakref
+from collections.abc import Callable, Sequence
 
 import pytest
 
 from simloop import Host, SimLoop
-from simloop._policy import MAX_CHOICE, ScriptedPolicy, SeededPolicy
+from simloop._policy import MAX_CHOICE, ReadyView, ScriptedPolicy, SeededPolicy
+
+
+def _ready(count: int) -> list[ReadyView]:
+    """A ready queue of ``count`` views, contents deliberately arbitrary.
+
+    The count-only policies must not read owners or labels, so the values
+    here are noise: any policy that looks at them is looking at nonsense.
+    """
+    return [(-1 - index, f"callback{index}") for index in range(count)]
 
 
 def test_seeded_policy_matches_a_bare_random_stream() -> None:
@@ -14,48 +25,68 @@ def test_seeded_policy_matches_a_bare_random_stream() -> None:
     sizes = [1, 2, 3, 7, 2, 64, 5, 1, 12, 3, 9]
     reference = random.Random(41)
     policy = SeededPolicy(41)
-    assert [policy.choose(n) for n in sizes] == [
+    assert [policy.choose(_ready(n)) for n in sizes] == [
         reference.randrange(n) for n in sizes
+    ]
+
+
+def test_seeded_policy_ignores_everything_but_the_ready_count() -> None:
+    # The property the whole schedule-identity guarantee rests on: widening
+    # the protocol gave the default policy more to look at, and it looks at
+    # none of it. Same lengths, wildly different views, identical draws.
+    sizes = [3, 1, 8, 2, 5, 5, 13]
+    plain = SeededPolicy(41)
+    exotic = SeededPolicy(41)
+    assert [plain.choose(_ready(n)) for n in sizes] == [
+        exotic.choose([(7, "Task.task_wakeup")] * n) for n in sizes
     ]
 
 
 def test_seeded_policy_never_diverges() -> None:
     policy = SeededPolicy(0)
     for _ in range(10):
-        policy.choose(4)
+        policy.choose(_ready(4))
     assert policy.diverged_at is None
 
 
 def test_scripted_policy_replays_its_recording() -> None:
     policy = ScriptedPolicy([2, 0, 1])
-    assert [policy.choose(3), policy.choose(4), policy.choose(2)] == [2, 0, 1]
+    assert [
+        policy.choose(_ready(3)),
+        policy.choose(_ready(4)),
+        policy.choose(_ready(2)),
+    ] == [2, 0, 1]
     assert policy.diverged_at is None
 
 
 def test_scripted_policy_clamps_choices_past_the_ready_queue() -> None:
     policy = ScriptedPolicy([5, 1])
-    assert policy.choose(3) == 2
+    assert policy.choose(_ready(3)) == 2
     assert policy.diverged_at == 0
-    assert policy.choose(2) == 1
+    assert policy.choose(_ready(2)) == 1
 
 
 def test_scripted_policy_marks_only_the_first_divergence() -> None:
     policy = ScriptedPolicy([0, 9, 9])
-    assert [policy.choose(4), policy.choose(2), policy.choose(2)] == [0, 1, 1]
+    assert [
+        policy.choose(_ready(4)),
+        policy.choose(_ready(2)),
+        policy.choose(_ready(2)),
+    ] == [0, 1, 1]
     assert policy.diverged_at == 1
 
 
 def test_exhausted_scripted_policy_falls_back_to_fifo() -> None:
     policy = ScriptedPolicy([1])
-    assert policy.choose(3) == 1
+    assert policy.choose(_ready(3)) == 1
     assert policy.diverged_at is None
-    assert [policy.choose(3), policy.choose(3)] == [0, 0]
+    assert [policy.choose(_ready(3)), policy.choose(_ready(3))] == [0, 0]
     assert policy.diverged_at == 1
 
 
 def test_empty_recording_is_pure_fifo() -> None:
     policy = ScriptedPolicy([])
-    assert policy.choose(5) == 0
+    assert policy.choose(_ready(5)) == 0
     assert policy.diverged_at == 0
 
 
@@ -64,6 +95,196 @@ def test_scripted_policy_rejects_impossible_choices() -> None:
         ScriptedPolicy([0, -1])
     with pytest.raises(ValueError, match="too large"):
         ScriptedPolicy([MAX_CHOICE + 1])
+
+
+# ----------------------------------------------------------------------
+# What the loop shows the policy
+# ----------------------------------------------------------------------
+
+
+class _Recording:
+    """Keeps every ready view the loop offers, then takes the oldest.
+
+    FIFO rather than a draw, because what is under test is the view the loop
+    builds and not the order a policy picks from it.
+    """
+
+    def __init__(self) -> None:
+        self.diverged_at: int | None = None
+        self.steps: list[tuple[ReadyView, ...]] = []
+
+    def choose(self, ready: Sequence[ReadyView]) -> int:
+        self.steps.append(tuple(ready))
+        return 0
+
+
+# One step's worth of probing: the count, the whole thing iterated, the first
+# entry, the first entry again, the last entry, and a slice of all of it.
+_Read = tuple[int, list[ReadyView], ReadyView, ReadyView, ReadyView, list[ReadyView]]
+
+
+class _Probing:
+    """Reads the ready sequence every way a policy might, and keeps what it saw."""
+
+    def __init__(self) -> None:
+        self.diverged_at: int | None = None
+        self.reads: list[_Read] = []
+
+    def choose(self, ready: Sequence[ReadyView]) -> int:
+        self.reads.append(
+            (
+                len(ready),
+                list(ready),  # iteration
+                ready[0],
+                ready[0],  # the same entry a second time
+                ready[-1],  # counted from the end
+                list(ready[:]),  # a slice
+            )
+        )
+        return 0
+
+
+async def _two_workers_and_two_callbacks() -> list[str]:
+    """Two tasks taking several steps each, alongside two bare callbacks."""
+    loop = asyncio.get_running_loop()
+    log: list[str] = []
+    loop.call_soon(log.append, "bare:first")
+    loop.call_soon(log.append, "bare:second")
+
+    async def worker(name: str) -> None:
+        for number in range(3):
+            await asyncio.sleep(0)
+            log.append(f"{name}:{number}")
+
+    first = asyncio.create_task(worker("one"), name="one")
+    second = asyncio.create_task(worker("two"), name="two")
+    await first
+    await second
+    return log
+
+
+def _run_recorded() -> tuple[SimLoop, _Recording]:
+    loop = SimLoop(seed=3)
+    policy = _Recording()
+    loop._policy = policy
+    try:
+        loop.run_until_complete(_two_workers_and_two_callbacks())
+    finally:
+        loop.close()
+    return loop, policy
+
+
+def test_the_views_line_up_with_the_ready_queue() -> None:
+    loop, policy = _run_recorded()
+    ran = [event.label for event in loop.trace if event.kind == "run"]
+    assert not any(event.kind == "cancel" for event in loop.trace)
+    # The index a policy returns indexes the views it was handed, so the view
+    # at that index must describe the callback the step actually ran. This
+    # policy always takes the first, so the first view of every step names
+    # what ran — position for position, in step order.
+    assert [step[0][1] for step in policy.steps] == ran
+    assert all(len(step) > 0 for step in policy.steps)
+
+
+def test_the_ready_sequence_reads_the_way_a_sequence_should() -> None:
+    # Views are built only where a policy looks, so every way of looking has
+    # to agree — and looking twice has to give the same answer.
+    loop = SimLoop(seed=3)
+    policy = _Probing()
+    loop._policy = policy
+    try:
+        loop.run_until_complete(_two_workers_and_two_callbacks())
+    finally:
+        loop.close()
+    assert any(count > 1 for count, *_ in policy.reads)  # not all queues of one
+    for count, iterated, first, again, last, sliced in policy.reads:
+        assert len(iterated) == count
+        assert first == iterated[0]
+        assert again == first
+        assert last == iterated[-1]
+        assert sliced == iterated
+
+
+def test_the_ready_sequence_follows_the_live_queue() -> None:
+    loop = SimLoop(seed=3)
+    views = loop._ready_views
+    assert len(views) == 0
+    # One sequence serves every step, reading the queue in place rather than
+    # copying it, which is what makes a step cost no allocation.
+    handle = loop.call_soon(print)
+    assert len(views) == 1
+    assert views[0][1] == "print"
+    with pytest.raises(IndexError):
+        views[1]  # what stops the Sequence mixin's iteration
+    handle.cancel()
+    loop.close()
+
+
+def test_every_step_of_a_task_carries_that_task_s_id() -> None:
+    _, policy = _run_recorded()
+    owners = {owner for step in policy.steps for owner, _ in step if owner >= 0}
+    # The task run_until_complete wrapped the coroutine in, plus the two
+    # workers. An id that changed between a task's own steps would show up
+    # here as a fourth, and one shared between tasks as a second.
+    assert owners == {0, 1, 2}
+    assert sum(1 for step in policy.steps for owner, _ in step if owner >= 0) > 10
+
+
+def test_a_callback_no_task_owns_gets_a_negative_id_of_its_own() -> None:
+    _, policy = _run_recorded()
+    bare = {
+        (owner, label)
+        for step in policy.steps
+        for owner, label in step
+        if label == "list.append"
+    }
+    assert len(bare) == 2  # one per call_soon, each with an id of its own
+    assert all(owner < 0 for owner, _ in bare)
+
+
+def test_the_loop_numbers_tasks_in_creation_order() -> None:
+    loop = SimLoop(seed=3)
+    tasks: list[asyncio.Task[None]] = []
+
+    async def main() -> None:
+        async def noop() -> None:
+            pass
+
+        tasks.extend(asyncio.create_task(noop()) for _ in range(3))
+        for task in tasks:
+            await task
+
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()
+    # 0 went to the task run_until_complete wrapped the coroutine in.
+    assert [loop._task_owner(task) for task in tasks] == [1, 2, 3]
+
+
+def test_the_owner_map_does_not_keep_a_finished_task_alive() -> None:
+    loop = SimLoop(seed=3)
+    watched: list[weakref.ref[asyncio.Task[None]]] = []
+
+    async def main() -> None:
+        async def noop() -> None:
+            pass
+
+        for _ in range(4):
+            task: asyncio.Task[None] = asyncio.create_task(noop())
+            watched.append(weakref.ref(task))
+            await task
+        await asyncio.sleep(0)  # let the last task's done callbacks run
+
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()
+    gc.collect()
+    # A campaign runs millions of tasks through one loop at a time, so the
+    # map that names them must never be the thing keeping one alive.
+    assert [reference() for reference in watched] == [None] * 4
+    assert len(loop._task_owners) == 1  # the awaited task, still referenced here
 
 
 # ----------------------------------------------------------------------
