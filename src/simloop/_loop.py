@@ -10,7 +10,7 @@ import socket
 import sys
 from array import array
 from asyncio import events
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from contextvars import Context
 from typing import TYPE_CHECKING, Any, NoReturn, TypeVarTuple, Unpack
 
@@ -334,6 +334,14 @@ class SimLoop(asyncio.AbstractEventLoop):
         if self._running:
             raise RuntimeError("cannot close a running event loop")
         self._sock_targets.clear()
+        # Connections still open at the end of a run — what a pooling client
+        # leaves behind — hold their liveness descriptors inside the socket
+        # object's reference cycle with the transport, so the descriptors
+        # would only come back when the cycle collector ran. Nothing can poll
+        # them once the loop is closed, so release them here instead.
+        for transport in self._net._streams.values():
+            if transport._extra_socket is not None:
+                transport._extra_socket._dispose()
         self._closed = True
 
     def _check_closed(self) -> None:
@@ -616,7 +624,25 @@ class SimLoop(asyncio.AbstractEventLoop):
             getattr(sock, "family", None) != socket.AF_INET
             or getattr(sock, "type", None) != socket.SOCK_STREAM
         ):
-            _fence("sock_connect (only AF_INET stream sockets are simulated)")
+            raise SimulationFenceError(
+                "simloop does not simulate 'sock_connect' for anything but "
+                "AF_INET stream sockets; see docs/supported-api.md for the "
+                "supported asyncio subset"
+            )
+        if (
+            isinstance(address, (str, bytes, bytearray))
+            or not isinstance(address, Sequence)
+            or len(address) != 2
+            or not isinstance(address[0], (str, bytes))
+            or isinstance(address[1], bool)
+            or not isinstance(address[1], int)
+        ):
+            # Caught here rather than deeper: a bare host string would be read
+            # character by character, and a string port would surface much
+            # later as a confusing error about something else entirely.
+            raise OSError(
+                f"sock_connect needs an AF_INET (host, port) address, got {address!r}"
+            )
         host, port = address[0], address[1]
         self._net._resolve(host)  # unknown targets fail here, loudly
         # No packet moves and no time passes yet: the connection handshake
