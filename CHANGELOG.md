@@ -6,8 +6,11 @@
   `host.restart()`) revives a machine as a fresh incarnation. It restores
   liveness and nothing else — the old tasks stay cancelled and the
   listeners are gone, so the caller boots the machine again the way it
-  booted it the first time — and traffic due while the host was dead is
-  lost, leaving peers to notice the outage from their own timeouts.
+  booted it the first time. Traffic due while the host was dead is lost,
+  leaving peers to notice the outage from their own timeouts. Crashes are
+  now recorded too: `crash()` writes a trace event and consumes a uid, so
+  a workload that crashes a host hashes differently than it did in 0.1.0
+  (workloads that never crash stay byte-identical to 0.1.0).
 - Every host now has `host.disk`, a mapping that survives its crashes:
   where state a real process would fsync belongs. Writes are atomic at
   assignment; there is no partial-write model.
@@ -16,7 +19,7 @@
   hand to `call_at` with it, while durations (`sleep`, `timeout`,
   `wait_for`, `call_later`) cost the same everywhere — which is what a
   wrong wall clock does to a real machine. Traces stay on the true clock,
-  and runs that configure no offset are byte-identical to before.
+  and runs that configure no offset are byte-identical to 0.1.0.
 - A second flagship demo: `examples/raft/` is a teaching-sized Raft (leader
   election + log replication, plain asyncio on streams) tested only under
   simulation — four safety invariants checked over 50,000 chaos seeds, five

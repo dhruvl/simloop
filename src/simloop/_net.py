@@ -444,8 +444,8 @@ class SimNetwork:
         long a duration takes: ``asyncio.sleep(1.0)`` still costs one true
         second everywhere, which is what a wrong wall clock does on a real
         machine. Deadlines passed to ``call_at`` are interpreted on the
-        calling task's clock. The driver and unconfigured hosts read true
-        time.
+        calling task's clock. By default the driver and unconfigured hosts
+        read true time.
         """
         self._require_host(name)
         self._clock_offsets[name] = float(offset)
@@ -837,6 +837,11 @@ class SimNetwork:
         State meant to survive the reboot belongs on ``Host.disk``. The
         caller boots whatever should run on the revived machine, the same
         way it booted the machine the first time.
+
+        "Already cancelled" means requested, not finished: ``crash`` asks
+        each task to cancel and the cancellation lands on the next
+        scheduler step, so a restart in the same step can briefly coexist
+        with a dying task that swallows ``CancelledError``.
         """
         self._require_host(name)
         if self._alive[name]:
