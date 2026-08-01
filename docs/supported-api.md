@@ -44,6 +44,8 @@ a host belong to an implicit `driver` host.
 | `loop.getaddrinfo` | Resolves against the host table, never DNS: a registered host name, its synthetic address, or a loopback-shaped name (`None`, `""`, `localhost`, `127.0.0.1`, `0.0.0.0`) meaning the calling task's own host. Returns stdlib-shaped rows — `(AF_INET, SOCK_STREAM, IPPROTO_TCP, "", (address, port))` and the `SOCK_DGRAM` / `IPPROTO_UDP` row — filtered by `family`, `type` and `proto`. Ports are numeric (`int`, a digit string, or `None` for 0); resolver `flags` have nothing to vary |
 | `loop.getnameinfo` | Reverse lookup: a synthetic address maps back to its host name, and a host name (what `get_extra_info("peername")` reports) maps to itself. `NI_NUMERICHOST` returns the address instead; services are always numeric |
 | `loop.net.address` / `hostname` | The mapping itself: every registered host owns one synthetic IPv4 address from `10.7.0.0/16` — `10.7.0.1`, `10.7.0.2`, ... handed out in registration order, starting with the implicit `driver` host |
+| `loop.sock_connect` + `create_connection(sock=...)` | The two-call connect sequence aiohttp's connector performs. On an `AF_INET` stream socket, `sock_connect` places the target in the host table and records it against the socket — no packet moves and no virtual time passes, and a target the table cannot place raises `OSError` there. `create_connection(sock=...)` then claims that recorded address: it closes the real descriptor (the loop takes ownership, as the stdlib does) and opens a simulated connection, paying the same one round trip a direct connect pays, so a closed port raises `ConnectionRefusedError` from this call rather than the first. Passing a socket that no `sock_connect` on this loop parked raises `OSError`; passing `host`/`port` alongside `sock` raises `ValueError`. Binding a source address first — `TCPConnector(local_addr=...)` — is not supported: the connector binds the real socket before the simulation is consulted, and a synthetic address belongs to no real interface, so the bind fails outside the loop |
+| `transport.get_extra_info("socket")` (streams) | A stand-in object, not a network socket: `family` / `type` / `proto` report `AF_INET` / `SOCK_STREAM` / `IPPROTO_TCP`, `getsockname()` and `getpeername()` return `(synthetic address, port)` tuples for the two ends, and `setsockopt`, `shutdown` and `close` are accepted and do nothing. `fileno()` returns a parked descriptor the transport owns, created on first call, that polls unreadable while the peer is alive and readable once the peer's EOF or reset arrives — which is how a pool that checks readability sees a dead connection. It is closed with the transport, and reports `-1` from then on. No bytes ever cross it: `recv`, `send` and anything else not listed above raise `AttributeError` rather than pretend. Datagram transports still report `None` |
 
 Names and their synthetic addresses are interchangeable wherever an endpoint
 is accepted, so a client can resolve a name and connect to what it got back.
@@ -62,5 +64,14 @@ reliable by construction; and addressing is IPv4-only and entirely synthetic
 
 Anything that reaches outside the simulation raises `SimulationFenceError`:
 executors and threads (`run_in_executor`, `call_soon_threadsafe`), signal
-handlers, subprocesses, raw sockets (`sock_*`), file-descriptor callbacks
-(`add_reader` / `add_writer`), TLS upgrades, `sendfile`, and pipes.
+handlers, subprocesses, file-descriptor callbacks (`add_reader` /
+`add_writer`), TLS upgrades, `sendfile`, and pipes.
+
+The socket calls are fenced with one exception. `sock_connect` on an
+`AF_INET` stream socket is simulated — it is how client stacks reach the
+network, and the table above says what it does. Every other socket kind
+fences there — datagram, raw and IPv6 alike — and the rest of the family
+stays fenced outright: `sock_recv`, `sock_recv_into`, `sock_sendall`,
+`sock_sendto`, `sock_recvfrom`, `sock_recvfrom_into`, `sock_accept` and
+`sock_sendfile`. Client stacks do not need them: the socket they connect
+is upgraded into a transport instead of being read and written directly.
