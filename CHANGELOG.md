@@ -78,6 +78,16 @@
   wire protocol under a SimLoop, and `docs/compatibility.md` publishes what
   each one did, verbatim. Dev-only — the probes are never packaged, their
   pinned dependencies live in their own group, and CI does not run them.
+- Composing with Hypothesis is a documented recipe with a test behind it:
+  `docs/cookbook.md` walks through `@given` generating the workload while
+  `explore()` runs it under a range of seeds, and
+  `tests/test_hypothesis_recipe.py` runs that composition in CI — a green case
+  across examples and seeds, and a planted bug where Hypothesis shrinks the
+  workload to its minimum while the reported seed replays the schedule on its
+  own. It is a recipe rather than an integration: nothing was added to the
+  package, seeds are deliberately not a strategy (a seed has no size to shrink
+  toward, and two shrinkers aimed at one failure fight), and Hypothesis is a
+  dev dependency of this repository rather than something simloop imports.
 - `server.sockets` on a simulated server answers with an empty tuple
   instead of not existing, which is all aiohttp's `web.TCPSite` and
   websockets' `serve()` need to start; both now run their documented
