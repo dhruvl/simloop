@@ -178,7 +178,7 @@ net.crash("node2")                              # no reset, just silence
   stdlib outside one, so code under test can use entropy and clocks
   without breaking replay.
 
-## Proving it: the jobqueue demo
+## Proving it: the demos
 
 `examples/jobqueue/` is a complete distributed system — an exactly-once
 job scheduler (leases, fencing tokens, idempotency keys, backoff, and
@@ -187,6 +187,17 @@ simloop. Its suite runs hundreds of seeds of partitions, crashes, and
 poison jobs, and shows that removing any load-bearing safeguard produces
 a violation the explorer finds and replays from a seed. The bug table
 lives in [examples/jobqueue/README.md](https://github.com/dhruvl/simloop/blob/main/examples/jobqueue/README.md).
+
+`examples/raft/` is the second proof: a teaching-sized Raft — leader
+election and log replication in plain asyncio on streams — swept under
+50,000 seeds of partitions, crashed-and-restarted processes, and message
+loss. Four safety invariants hold on every seed; remove any safeguard
+(the vote ledger, the log-freshness check, the commit gate,
+persistence-before-reply, stale-term rejection) and the explorer finds a
+seed-replayable violation, then minimizes the failing schedule to the
+steps that had to go a particular way — one step out of 3,514 recorded, in
+the sharpest case. The table lives in
+[examples/raft/README.md](https://github.com/dhruvl/simloop/blob/main/examples/raft/README.md).
 
 ## Performance
 

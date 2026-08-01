@@ -2,6 +2,12 @@
 
 ## 0.2.0 (unreleased)
 
+- A second flagship demo: `examples/raft/` is a teaching-sized Raft (leader
+  election + log replication, plain asyncio on streams) tested only under
+  simulation — four safety invariants checked over 50,000 chaos seeds, five
+  safeguard ablations each caught and replayed from a seed, and failing
+  schedules minimized toward FIFO — down to a single interesting step in the
+  sharpest case.
 - Campaign evidence at scale, regenerable via `benchmarks/campaign.py`:
   100,000 seeds of jobqueue chaos green in six minutes on a laptop, every
   ablation caught with its failure density recorded, and 20 sampled failing

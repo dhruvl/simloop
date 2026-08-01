@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 from dataclasses import dataclass
 from typing import Any
 
@@ -11,6 +12,8 @@ from simloop import SimLoop, sim
 from raft import wire
 from raft.node import LEADER, PORT, Event, RaftNode, Safeguards
 from raft.storage import Entry, MemoryStorage
+
+from checks import check_invariants
 
 
 def sim_loop() -> SimLoop:
@@ -78,6 +81,24 @@ async def restart(cluster: Cluster, name: str) -> None:
     except asyncio.CancelledError:
         pass
     _boot(cluster, name, member.storage)
+
+
+async def chaos(cluster: Cluster, rng: random.Random) -> None:
+    """A seed-derived fault schedule: partition windows and process restarts.
+
+    Cut sizes never exceed half the cluster, so a quorum side always exists
+    and the driver -- which is never partitioned -- can keep proposing.
+    """
+    loop = sim_loop()
+    for _ in range(3):
+        await asyncio.sleep(rng.uniform(0.5, 2.0))
+        cut = rng.sample(cluster.names, rng.randint(1, (len(cluster.names) - 1) // 2))
+        rest = [name for name in cluster.names if name not in cut]
+        loop.net.partition(cut, rest)
+        await asyncio.sleep(rng.uniform(0.5, 3.0))
+        loop.net.heal()
+        if rng.random() < 0.5:
+            await restart(cluster, rng.choice(cluster.names))
 
 
 def leader_now(cluster: Cluster) -> str | None:
@@ -148,6 +169,14 @@ async def settle(cluster: Cluster, *, timeout_s: float = 120.0) -> None:
     """Wait (in virtual time) until every live member applied the same sequence."""
     async with asyncio.timeout(timeout_s):
         while True:
+            for member in cluster.members.values():
+                # A node that died of a real bug would otherwise just drop out
+                # of the quorum below and let the rest converge without it.
+                # Reading the result re-raises whatever killed it. Restarts
+                # cancel their task, and a cancelled task has no result to
+                # speak of, so those stay excluded quietly as before.
+                if member.task.done() and not member.task.cancelled():
+                    member.task.result()
             live = [
                 member.node
                 for member in cluster.members.values()
@@ -157,3 +186,48 @@ async def settle(cluster: Cluster, *, timeout_s: float = 120.0) -> None:
             if applied and applied[0] and all(a == applied[0] for a in applied):
                 return
             await asyncio.sleep(0.2)
+
+
+async def figure_eight(safeguards: Safeguards) -> Cluster:
+    """The paper's Figure 8: an old-term entry reaches a quorum much later.
+
+    With the commit gate on, that entry may only commit once an entry of
+    the sitting leader's own term commits above it; with the gate off, a
+    counting leader commits it directly -- and a rival with a later-term
+    log can still erase it.
+    """
+    loop = sim_loop()
+    cluster = await start_cluster(size=5, safeguards=safeguards)
+    s1 = await wait_for_leader(cluster)
+    await propose(cluster, "a")
+    others = [name for name in cluster.names if name != s1]
+    buddy = others[0]
+    # "b" lands on s1 and buddy only, then the pair is cut off.
+    loop.net.partition([s1, buddy], others[1:])
+    await wire.call(s1, PORT, {"op": "propose", "command": "b"}, timeout_s=1.0)
+    await asyncio.sleep(0.5)
+    # The majority elects a new leader; it takes "c" and is cut before
+    # replicating it anywhere (on the seeds where the race lands that way).
+    s5 = await wait_for_leader(cluster, timeout_s=30.0, settle_s=1.0)
+    await wire.call(s5, PORT, {"op": "propose", "command": "c"}, timeout_s=1.0)
+    loop.net.heal()
+    loop.net.partition([s5], [name for name in cluster.names if name != s5])
+    # s1's side can now retake the cluster and spread "b" to a quorum. The
+    # two followers s5 left behind keep timing out and campaigning, and each
+    # doomed run -- their logs are short of s1's, so the up-to-date check
+    # refuses them -- drags the term up before s1 can win one of its own. The
+    # window has to cover those rounds plus the catch-up.
+    await asyncio.sleep(5.0)
+    loop.net.heal()
+    loop.net.partition([s1], [name for name in cluster.names if name != s1])
+    # With s1 gone and s5 back, s5's later-term log can win and erase "b".
+    # A settle() here would only ever time out: the gate is exercisable only
+    # with the no-op off, and s1 -- still cut away -- never catches up.
+    await propose(cluster, "d", timeout_s=60.0)
+    await asyncio.sleep(2.0)
+    return cluster
+
+
+def verify(cluster: Cluster) -> None:
+    """Hold the run's whole history against the four safety claims."""
+    check_invariants(cluster.logs(), cluster.events)

@@ -76,7 +76,7 @@ def test_commits_and_applies_up_to_the_leaders_mark() -> None:
     append(node, entries=[[1, "a"], [1, "b"]], commit=1)
     assert node.commit_index == 1
     assert node.applied == [Entry(1, "a")]
-    assert events == [("apply", "n1", 1, 1, "a")]
+    assert events == [("apply", "n1", 1, 1, "a", 1)]
 
 
 def test_a_noop_advances_commit_but_not_the_state_machine() -> None:
@@ -85,7 +85,7 @@ def test_a_noop_advances_commit_but_not_the_state_machine() -> None:
     append(node, entries=[[1, ""], [1, "x"]], commit=2)
     assert node.commit_index == 2
     assert node.applied == [Entry(1, "x")]
-    assert events == [("apply", "n1", 2, 1, "x")]
+    assert events == [("apply", "n1", 2, 1, "x", 1)]
 
 
 def test_never_commits_past_what_it_verified() -> None:

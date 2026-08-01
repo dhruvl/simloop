@@ -27,7 +27,9 @@ CANDIDATE = "candidate"
 LEADER = "leader"
 
 # One observable fact, appended in order: ("leader", name, term, log_snapshot)
-# or ("apply", name, index, term, command). The safety checks read these.
+# or ("apply", name, index, term, command, node_term), where node_term is the
+# applier's current term -- on the first apply of an index that is the term
+# whose leader committed it. The safety checks read these.
 Event = tuple[Any, ...]
 
 
@@ -72,7 +74,7 @@ class RaftNode:
         self._safeguards = safeguards if safeguards is not None else Safeguards()
         self._events = events
         self._state = storage.load()
-        self._quorum = (len(peers) + 1) // 2 + 1
+        self._quorum = (len(self._peers) + 1) // 2 + 1
         self.role = FOLLOWER
         self.commit_index = 0
         self.applied: list[Entry] = []
@@ -99,15 +101,19 @@ class RaftNode:
     # ------------------------------------------------------------------
 
     async def run(self) -> None:
-        handlers: set[asyncio.Task[None]] = set()
+        # An insertion-ordered dict rather than a set: the sweep below cancels
+        # these in iteration order, and a set of tasks iterates by id(), which
+        # moves between runs -- two handlers swapping places there is enough to
+        # give one seed two different traces.
+        handlers: dict[asyncio.Task[None], None] = {}
 
         async def connection(
             reader: asyncio.StreamReader, writer: asyncio.StreamWriter
         ) -> None:
             task = asyncio.current_task()
             assert task is not None
-            handlers.add(task)
-            task.add_done_callback(handlers.discard)
+            handlers[task] = None
+            task.add_done_callback(lambda done: handlers.pop(done, None))
             await self._connection(reader, writer)
 
         server = await asyncio.start_server(connection, "0.0.0.0", self._port)
@@ -396,6 +402,11 @@ class RaftNode:
             self._applied_index += 1
             if entry.command:
                 self._record(
-                    "apply", self._name, self._applied_index, entry.term, entry.command
+                    "apply",
+                    self._name,
+                    self._applied_index,
+                    entry.term,
+                    entry.command,
+                    self._state.term,
                 )
                 self.applied.append(entry)
