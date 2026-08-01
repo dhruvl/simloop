@@ -110,8 +110,9 @@ The piece a pool depends on is the descriptor `fileno()` returns: httpcore
 polls it to decide whether a pooled connection has died, and the
 simulation backs it with a parked descriptor the transport owns, which
 stays unreadable while the peer is alive and becomes readable once the
-peer's EOF or reset arrives. That contract is pinned by the test suite,
-not by these rows.
+peer's EOF arrives; a reset or a teardown closes it and `fileno()` returns
+`-1`, which the same poll reads as dead just as well. That contract is
+pinned by the test suite, not by these rows.
 
 Both client rows are `http://` only, and the two stacks stop differently
 on `https://`. aiohttp asks for TLS through `create_connection(ssl=...)`,
