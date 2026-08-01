@@ -523,8 +523,14 @@ class SimLoop(asyncio.AbstractEventLoop):
         *,
         name: str | None = None,
         context: Context | None = None,
+        eager_start: bool | None = None,
     ) -> asyncio.Task[Any]:
         self._check_closed()
+        if eager_start:
+            # An eager first step runs at creation time, before the ready
+            # queue ever sees the task, so the seeded draw would never get to
+            # order it against anything.
+            _fence("create_task(eager_start=True)")
         if self._task_factory is None:
             task: asyncio.Task[Any] = asyncio.Task(
                 coro, loop=self, name=name, context=context

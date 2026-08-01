@@ -80,9 +80,12 @@ Anything that reaches outside the simulation raises `SimulationFenceError`:
 executors and threads (`run_in_executor`, `call_soon_threadsafe`), signal
 handlers, subprocesses, file-descriptor callbacks (`add_reader` /
 `add_writer`), loop-level TLS upgrades (`start_tls`,
-`create_connection(ssl=...)`), `sendfile`, and pipes. TLS a library
-performs in memory reaches no loop API and so reaches no fence; what that
-means in practice is in [docs/compatibility.md](compatibility.md).
+`create_connection(ssl=...)`), `sendfile`, pipes, and an eager task start
+(`create_task(eager_start=True)`), which would run a task's first step at
+creation time, before the seeded draw could order it against anything. TLS
+a library performs in memory reaches no loop API and so reaches no fence;
+what that means in practice is in
+[docs/compatibility.md](compatibility.md).
 
 The socket calls are fenced with one exception. `sock_connect` on an
 `AF_INET` stream socket is simulated — it is how client stacks reach the
