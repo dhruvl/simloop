@@ -116,7 +116,9 @@ class _ReadyViews(Sequence[ReadyView]):
     Views are recomputed rather than cached, which is safe because computing
     one has no side effect — the owner numbers are handed out in
     ``create_task``, long before anything here looks at them — so indexing an
-    entry twice simply returns equal tuples.
+    entry twice simply returns equal tuples, the one caveat being that
+    naming an owner reads ``__self__`` off the callback, which only a
+    callable with a side-effecting ``__getattr__`` could notice.
     """
 
     __slots__ = ("_entries", "_owners")

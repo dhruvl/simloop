@@ -7,7 +7,14 @@ from collections.abc import Callable, Sequence
 import pytest
 
 from simloop import Host, SimLoop
-from simloop._policy import MAX_CHOICE, ReadyView, ScriptedPolicy, SeededPolicy
+from simloop._policy import (
+    MAX_CHOICE,
+    PCTPolicy,
+    ReadyView,
+    SchedulingPolicy,
+    ScriptedPolicy,
+    SeededPolicy,
+)
 
 
 def _ready(count: int) -> list[ReadyView]:
@@ -95,6 +102,163 @@ def test_scripted_policy_rejects_impossible_choices() -> None:
         ScriptedPolicy([0, -1])
     with pytest.raises(ValueError, match="too large"):
         ScriptedPolicy([MAX_CHOICE + 1])
+
+
+# ----------------------------------------------------------------------
+# Priority-based exploration
+# ----------------------------------------------------------------------
+
+
+def _owned(*owners: int) -> list[ReadyView]:
+    """A ready queue owned by ``owners``, in that order."""
+    return [(owner, f"task{owner}.step") for owner in owners]
+
+
+# Queue shapes with owners appearing, vanishing and coming back, so a run
+# over them exercises more than one queue length and more than one position.
+_SCRIPT = [
+    _owned(0, 1, 2),
+    _owned(1, 2),
+    _owned(0, 2, 3, 4),
+    _owned(4, 0),
+    _owned(2, 3, 0, 1),
+    _owned(5),
+    _owned(5, 1, 0),
+    _owned(3, 4, 5, 0, 1, 2),
+]
+
+
+def _drive(policy: PCTPolicy) -> list[int]:
+    return [policy.choose(views) for views in _SCRIPT]
+
+
+def test_pct_policy_repeats_itself_for_the_same_configuration() -> None:
+    # Determinism is the whole premise: a campaign that reports a seed must
+    # be able to hand that seed back and get the identical schedule.
+    first = _drive(PCTPolicy(seed=41, depth=3, horizon=64))
+    second = _drive(PCTPolicy(seed=41, depth=3, horizon=64))
+    assert first == second
+    assert len(set(first)) > 1  # not a constant sequence dressed up as agreement
+
+
+def test_pct_policy_explores_differently_under_different_seeds() -> None:
+    # Priorities come from the seed, so seeds are what make a campaign cover
+    # more than one schedule. One differing run is enough to prove it.
+    baseline = _drive(PCTPolicy(seed=0, depth=3, horizon=64))
+    assert any(
+        _drive(PCTPolicy(seed=seed, depth=3, horizon=64)) != baseline
+        for seed in range(1, 12)
+    )
+
+
+def test_pct_policy_keeps_running_the_same_owner_when_nothing_demotes_it() -> None:
+    # The property that separates PCT from a uniform draw: priorities are
+    # drawn once and held, so with no change points one owner runs and runs.
+    # depth=1 means zero demotions, which makes "held" checkable exactly.
+    policy = PCTPolicy(seed=7, depth=1, horizon=16)
+    queue = _owned(11, 22)
+    winners = [queue[policy.choose(queue)][0] for _ in range(12)]
+    assert winners == [winners[0]] * 12
+    assert winners[0] in (11, 22)
+
+
+def test_pct_policy_demotes_the_leader_at_a_change_point() -> None:
+    # depth=2, horizon=4 puts the single change point inside the first four
+    # steps, so a twelve-step run must contain the handover.
+    policy = PCTPolicy(seed=3, depth=2, horizon=4)
+    queue = _owned(11, 22)
+    winners = [queue[policy.choose(queue)][0] for _ in range(12)]
+    assert len(set(winners)) == 2, winners
+    handover = next(step for step, w in enumerate(winners) if w != winners[0])
+    # Demotion is permanent: the old leader sits below every fresh priority
+    # and below every later demotion, so it never leads again.
+    assert winners[handover:] == [winners[handover]] * (12 - handover)
+
+
+def test_pct_policy_lowers_each_demotion_below_the_last() -> None:
+    # depth=3, horizon=3 puts two distinct change points inside the first
+    # three steps, so a six-step run actually reaches both and builds a
+    # ladder rather than a single step down.
+    policy = PCTPolicy(seed=2, depth=3, horizon=3)
+    queue = _owned(11, 22, 33)
+    winners = [queue[policy.choose(queue)][0] for _ in range(6)]
+    # A demoted owner cannot lead again, so each change point hands the
+    # queue to someone new: three owners, three reigns, in demotion order.
+    leaders = list(dict.fromkeys(winners))
+    assert len(leaders) == 3, winners
+    first_demoted, second_demoted, _ = leaders
+    # The owner pushed off first must still outrank the one pushed off
+    # second — that is what the descending floor buys. Asked in the order
+    # that makes the answer mean something: a policy that dropped both to
+    # one shared floor would tie, and a tie takes index 0.
+    probe = _owned(second_demoted, first_demoted)
+    assert probe[policy.choose(probe)][0] == first_demoted
+
+
+def test_pct_policy_gives_a_newcomer_a_priority_that_competes() -> None:
+    # Tasks are created mid-run, so an owner seen for the first time has to
+    # be dealt in — with a priority drawn from the same range as everyone
+    # else's, which means it sometimes wins immediately and sometimes loses.
+    established = _owned(11, 22)
+    joined = _owned(11, 22, 33)
+    newcomer_wins = 0
+    for seed in range(24):
+        policy = PCTPolicy(seed=seed, depth=1, horizon=16)
+        for _ in range(5):
+            policy.choose(established)
+        leader = established[policy.choose(established)][0]
+        winner = joined[policy.choose(joined)][0]
+        # Nothing about the newcomer may reorder the owners already ranked.
+        assert winner in (leader, 33)
+        newcomer_wins += winner == 33
+    assert 0 < newcomer_wins < 24
+
+
+def test_pct_policy_draws_a_fresh_priority_for_every_unowned_callback() -> None:
+    # Unowned entries carry an id unique to the callback — the loop hands
+    # out a fresh one per queued callback, never a repeat — so under PCT
+    # each is its own one-step chain: a fresh draw, a fresh chance to run
+    # first. A queue of them therefore reshuffles instead of settling.
+    policy = PCTPolicy(seed=5, depth=1, horizon=16)
+    seq = iter(range(1000))
+    choices = [
+        policy.choose([(-1 - next(seq), "callback") for _ in range(4)])
+        for _ in range(16)
+    ]
+    assert len(set(choices)) > 1
+
+
+def test_pct_policy_is_a_scheduling_policy() -> None:
+    # The loop only ever holds a policy through the protocol, so the binding
+    # below is the assertion: it is mypy that has to accept it.
+    policy: SchedulingPolicy = PCTPolicy(seed=0)
+    assert policy.choose(_owned(4, 9)) in (0, 1)
+    assert policy.diverged_at is None
+
+
+def test_pct_policy_never_diverges() -> None:
+    # Divergence describes a replay that stopped matching its recording;
+    # a policy that generates its own schedule has nothing to depart from.
+    policy = PCTPolicy(seed=1, depth=3, horizon=64)
+    _drive(policy)
+    assert policy.diverged_at is None
+
+
+def test_pct_policy_rejects_a_degenerate_configuration() -> None:
+    with pytest.raises(ValueError, match="depth"):
+        PCTPolicy(seed=1, depth=0)
+    with pytest.raises(ValueError, match="depth"):
+        PCTPolicy(seed=1, depth=-2)
+    with pytest.raises(ValueError, match="horizon"):
+        PCTPolicy(seed=1, horizon=0)
+    with pytest.raises(ValueError, match="horizon"):
+        PCTPolicy(seed=1, horizon=-5)
+    # Change points are distinct, so a horizon with fewer steps than the
+    # depth needs cannot deliver the depth that was asked for. Saying so
+    # beats silently scheduling at a shallower depth than the caller thinks.
+    with pytest.raises(ValueError, match="change points"):
+        PCTPolicy(seed=1, depth=5, horizon=3)
+    PCTPolicy(seed=1, depth=4, horizon=3)  # exactly enough room is enough
 
 
 # ----------------------------------------------------------------------
@@ -284,7 +448,7 @@ def test_the_owner_map_does_not_keep_a_finished_task_alive() -> None:
     # A campaign runs millions of tasks through one loop at a time, so the
     # map that names them must never be the thing keeping one alive.
     assert [reference() for reference in watched] == [None] * 4
-    assert len(loop._task_owners) == 1  # the awaited task, still referenced here
+    assert len(loop._task_owners) == 1  # the wrapper task run_until_complete holds
 
 
 # ----------------------------------------------------------------------
