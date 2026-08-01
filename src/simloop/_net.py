@@ -232,34 +232,129 @@ def _check_latency(value: tuple[float, float]) -> tuple[float, float]:
     return (lo, hi)
 
 
+class _Deleted:
+    """The journal's way of writing down that a key went away."""
+
+    __slots__ = ()
+
+
+_DELETED = _Deleted()
+
+
 class SimDisk(MutableMapping[str, object]):
     """A host's storage that survives crashes and restarts.
 
     A crash loses everything volatile — tasks, connections, binds — but not
     what was written here, which is the whole point: this is where state
-    that a real process would fsync belongs. Writes are atomic at
-    assignment; there is no partial-write model. Values are stored as
-    given, so mutating a stored object later is the caller's own aliasing,
-    exactly as it would be with a cache in front of a real disk.
+    that a real process would fsync belongs. By default a write is durable
+    the moment it is made and there is no partial-write model. Values are
+    stored as given, so mutating a stored object later is the caller's own
+    aliasing, exactly as it would be with a cache in front of a real disk.
+
+    ``loop.net.set_disk(name, buffered=True)`` makes the disk lie the way a
+    real one does: writes and deletes queue in order and only reach durable
+    state on ``sync()``, while reads on the machine itself see them
+    immediately. A crash throws the queue away — durable state is what the
+    reboot finds. With ``torn=True`` a seeded prefix of the queue survives
+    instead, so the reboot can find a machine that got halfway through its
+    last batch. ``sync()`` exists on every disk and does nothing on an
+    unbuffered one, so the code under test is written once either way.
     """
 
     def __init__(self) -> None:
         self._data: dict[str, object] = {}
+        self._buffered = False
+        self._torn = False
+        # The journal is the ordered record a crash tears, the overlay is the
+        # same writes keyed for reading. Both are needed: the journal keeps
+        # repeated writes to one key as separate operations, which is what a
+        # prefix has to be a prefix of.
+        self._journal: list[tuple[str, object]] = []
+        self._overlay: dict[str, object] = {}
+
+    @property
+    def buffered(self) -> bool:
+        return self._buffered
+
+    @property
+    def torn(self) -> bool:
+        return self._torn
+
+    def sync(self) -> None:
+        """Make everything written so far durable, in the order it was written."""
+        for key, value in self._journal:
+            if value is _DELETED:
+                self._data.pop(key, None)
+            else:
+                self._data[key] = value
+        self._journal.clear()
+        self._overlay.clear()
+
+    def _configure(self, *, buffered: bool, torn: bool) -> None:
+        # Whatever is queued belongs to the disk as it was configured when the
+        # writes were made, so it lands before the new configuration applies.
+        self.sync()
+        self._buffered = buffered
+        self._torn = torn
+
+    def _crash(self, rng: random.Random) -> None:
+        journal, self._journal = self._journal, []
+        self._overlay.clear()
+        if not journal:
+            # Nothing was in flight, so there is nothing to decide and the
+            # seeded stream stays where it was. An unbuffered disk is always
+            # here: it has never queued anything.
+            return
+        kept = rng.randint(0, len(journal)) if self._torn else 0
+        for key, value in journal[:kept]:
+            if value is _DELETED:
+                self._data.pop(key, None)
+            else:
+                self._data[key] = value
 
     def __getitem__(self, key: str) -> object:
+        if key in self._overlay:
+            value = self._overlay[key]
+            if value is _DELETED:
+                raise KeyError(key)
+            return value
         return self._data[key]
 
     def __setitem__(self, key: str, value: object) -> None:
-        self._data[key] = value
+        if not self._buffered:
+            self._data[key] = value
+            return
+        self._journal.append((key, value))
+        self._overlay[key] = value
 
     def __delitem__(self, key: str) -> None:
-        del self._data[key]
+        if not self._buffered:
+            del self._data[key]
+            return
+        self[key]  # a delete of what is not there raises, buffered or not
+        self._journal.append((key, _DELETED))
+        self._overlay[key] = _DELETED
 
     def __iter__(self) -> Iterator[str]:
-        return iter(self._data)
+        if not self._overlay:
+            return iter(self._data)
+        return self._merged()
+
+    def _merged(self) -> Iterator[str]:
+        # Durable keys hold the place they were first written, which is where
+        # a flush would leave them too; keys the queue invented follow in the
+        # order they were written.
+        for key in self._data:
+            if self._overlay.get(key, None) is not _DELETED:
+                yield key
+        for key, value in self._overlay.items():
+            if key not in self._data and value is not _DELETED:
+                yield key
 
     def __len__(self) -> int:
-        return len(self._data)
+        if not self._overlay:
+            return len(self._data)
+        return sum(1 for _ in self._merged())
 
 
 class Host:
@@ -299,6 +394,10 @@ class SimNetwork:
         # Fault decisions draw from their own seed-derived stream so they can
         # never perturb the scheduler's draws or the sim.* user streams.
         self._rng = random.Random(f"{loop.seed}:net")
+        # Torn writes draw from a stream of their own for the same reason: a
+        # run that tears a disk must make exactly the network's own draws it
+        # would have made without one.
+        self._disk_rng = random.Random(f"{loop.seed}:disk")
         self._hosts: dict[str, Host] = {}
         self._addresses: dict[str, str] = {}
         self._names: dict[str, str] = {}
@@ -473,6 +572,28 @@ class SimNetwork:
         """
         self._require_host(name)
         self._clock_offsets[name] = float(offset)
+
+    def set_disk(
+        self, name: str, *, buffered: bool = False, torn: bool = False
+    ) -> None:
+        """Choose how honest a host's storage is about when a write lands.
+
+        A buffered disk holds writes and deletes until ``sync()``: the host
+        reads them back straight away, a crash before the flush loses them,
+        and the reboot sees only what was synced. ``torn`` decides what a
+        crash does with the queue — dropped whole by default, or cut at a
+        seeded point, keeping a prefix of it, which is the failure a machine
+        that lost power mid-batch actually leaves behind. Tearing needs a
+        buffer to tear, and configuring a disk flushes whatever it was
+        already holding. Contents are untouched: this says how the disk
+        behaves from here, not what is on it.
+        """
+        self._require_host(name)
+        if torn and not buffered:
+            raise ValueError(
+                "torn=True needs buffered=True: an unbuffered write is already durable"
+            )
+        self.host(name).disk._configure(buffered=buffered, torn=torn)
 
     def clock_offset(self, name: str) -> float:
         self._require_host(name)
@@ -827,7 +948,8 @@ class SimNetwork:
 
         A crashed machine sends no reset — peers see nothing at all, which is
         what makes crashes indistinguishable from partitions to the code
-        under test until a timeout says otherwise.
+        under test until a timeout says otherwise. A buffered disk loses
+        whatever it had not synced; see ``set_disk``.
         """
         self._require_host(name)
         if name == DRIVER:
@@ -835,6 +957,9 @@ class SimNetwork:
         if not self._alive[name]:
             raise ValueError(f"host {name!r} already crashed")
         self._alive[name] = False
+        disk = self._disks.get(name)
+        if disk is not None:
+            disk._crash(self._disk_rng)
         for task in list(self._tasks[name]):
             task.cancel()
         for key in [key for key in self._listeners if key[0] == name]:
