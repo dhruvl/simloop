@@ -21,12 +21,12 @@ hand-off — no I/O, no timers.
 
 | loop | median | per hop |
 |---|---|---|
-| stock asyncio | 0.319 s | 16.0 µs |
-| SimLoop | 0.088 s | 4.4 µs |
+| stock asyncio | 0.332 s | 16.6 µs |
+| SimLoop | 0.090 s | 4.5 µs |
 
-SimLoop comes out about **3.6× faster per scheduling step**, trace recording
+SimLoop comes out about **3.7× faster per scheduling step**, trace recording
 included, and the ratio holds from 10×2000 to 500×200 task/round shapes
-(0.26–0.30× across the sweep, widening with the task count). That is not
+(0.26–0.31× across the sweep, widening with the task count). That is not
 because simloop is a faster event loop in any general sense — it is because a
 simulated loop never touches the OS. Profiling the stock run shows about half
 its time inside `select.kqueue.control`: the real loop pays a selector
@@ -69,17 +69,16 @@ The jobqueue chaos campaign runs one full distributed scenario per seed —
 a broker, 3 workers, and 2 clients submitting 8 jobs (some poisoned) under
 randomized partitions and a worker crash, then settles for up to 600
 simulated seconds and checks every invariant. 300 seeds complete in
-**5.3–6.3 s** across nine runs (median 5.8 s), about **52 seeds/second**,
-in one process. A thousand-seed overnight search is a 19-second coffee
+**4.9–5.4 s** across nine runs (median 5.1 s), about **59 seeds/second**,
+in one process. A thousand-seed overnight search is a 17-second coffee
 break.
 
-That is slower than the ~55 seeds/second (5.4–6.0 s) published for 0.1.0,
-and the cost is a feature: 0.2.0 records a trace event for every packet
-delivery, not
-just for every send, which is what lets a timeline draw both ends of a
-crossing — and a scenario this network-heavy pays for the extra events
-directly. The wire is where this benchmark spends its time, which is why
-it is the number that moved.
+That is on par with — in fact a touch faster than — the ~55 seeds/second
+(5.4–6.0 s) published for 0.1.0, even though 0.2.0 records a trace event for
+every packet delivery, not just for every send, which is what lets a
+timeline draw both ends of a crossing. The extra event volume a
+network-heavy scenario like this one pays for no longer shows up as a
+wall-clock cost against the 0.1.0 baseline.
 
 ## Campaigns
 
@@ -116,13 +115,13 @@ default `campaign-{green,ablations}.json`) and resume from it with
 the failing seeds out of the `ablations` checkpoint. These files are scratch,
 not repository content — they are gitignored.
 
-Results, recorded 2026-08-01 on the M4 MacBook Air (10 jobs):
+Results, recorded 2026-08-04 on the M4 MacBook Air (10 jobs):
 
 | campaign | scale | result |
 |---|---|---|
-| green | 100,000 seeds, 5.6 min, 300.1 seeds/s | green — no invariant violated |
-| ablations | 6 mutations × 10,000 seeds, 2.5 min | every ablation caught, densities below |
-| replay stability | 20 failing seeds × 100 re-runs, 13.5 s | identical trace hash on every run |
+| green | 100,000 seeds, 6.3 min, 263.1 seeds/s | green — no invariant violated |
+| ablations | 6 mutations × 10,000 seeds, 2.7 min | every ablation caught, densities below |
+| replay stability | 20 failing seeds × 100 re-runs, 14.2 s | identical trace hash on every run |
 
 Per-ablation failure density:
 

@@ -129,7 +129,7 @@
   the syncs Raft owes before it answers an RPC; drop the sync before an
   append is acknowledged and the first seed loses a committed entry.
 - Campaign evidence at scale, regenerable via `benchmarks/campaign.py`:
-  100,000 seeds of jobqueue chaos green in under six minutes on a laptop,
+  100,000 seeds of jobqueue chaos green in just over six minutes on a laptop,
   every ablation caught with its failure density recorded, and 20 sampled
   failing seeds replaying with identical trace hashes across 100 re-runs
   apiece. A small nightly CI sweep keeps the numbers honest.
