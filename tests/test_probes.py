@@ -26,7 +26,7 @@ async def _returns(loop: SimLoop) -> str:
 
 
 async def _fences(loop: SimLoop) -> str:
-    loop.call_soon_threadsafe(print)
+    loop.add_reader(0, print)
     return "unreachable"
 
 
@@ -38,7 +38,7 @@ async def _fences_inside_a_group(loop: SimLoop) -> str:
 
 async def _fences_behind_a_cause(loop: SimLoop) -> str:
     try:
-        loop.call_soon_threadsafe(print)
+        loop.add_reader(0, print)
     except SimulationFenceError as fence:
         raise RuntimeError("the library wrapped it") from fence
     return "unreachable"
@@ -64,7 +64,7 @@ def test_a_probe_that_returns_reports_what_it_exercised() -> None:
 def test_a_fence_is_reported_verbatim() -> None:
     verdict = _runner.run(_fences)
     assert verdict == (
-        "fenced: simloop does not simulate 'call_soon_threadsafe'; "
+        "fenced: simloop does not simulate 'add_reader'; "
         "see docs/supported-api.md for the supported asyncio subset"
     )
 
