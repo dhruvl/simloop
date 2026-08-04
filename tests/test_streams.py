@@ -539,20 +539,72 @@ def test_duplicate_bind_and_foreign_bind_are_rejected() -> None:
         loop.close()
 
 
-def test_ssl_arguments_are_fenced() -> None:
+def test_ssl_arguments_are_checked_the_way_the_stdlib_checks_them() -> None:
+    import ssl
+
+    loop = _network()
+
+    async def main() -> None:
+        running: Any = asyncio.get_running_loop()
+        with pytest.raises(TypeError, match="'object'"):
+            await running.create_connection(
+                asyncio.Protocol, "server", 9000, ssl=object()
+            )
+        with pytest.raises(ValueError, match="server_hostname"):
+            await running.create_connection(
+                asyncio.Protocol, "server", 9000, server_hostname="server"
+            )
+        with pytest.raises(ValueError, match="server_hostname"):
+            await running.create_connection(
+                asyncio.Protocol, ssl=ssl.create_default_context(), sock=object()
+            )
+        with pytest.raises(ValueError, match="ssl_handshake_timeout"):
+            await running.create_connection(
+                asyncio.Protocol, "server", 9000, ssl_handshake_timeout=1.0
+            )
+        with pytest.raises(ValueError, match="ssl_shutdown_timeout"):
+            await running.create_connection(
+                asyncio.Protocol, "server", 9000, ssl_shutdown_timeout=1.0
+            )
+        with pytest.raises(ValueError, match="valid SSLContext"):
+            await running.create_server(asyncio.Protocol, "0.0.0.0", 9000, ssl=True)
+        with pytest.raises(ValueError, match="ssl_handshake_timeout"):
+            await running.create_server(
+                asyncio.Protocol, "0.0.0.0", 9000, ssl_handshake_timeout=1.0
+            )
+
+    try:
+        loop.run_until_complete(loop.net.host("server").create_task(main()))
+    finally:
+        loop.close()
+
+
+def test_the_fence_did_not_get_wider_than_tls() -> None:
+    import socket
+    import ssl
+
     from simloop import SimulationFenceError
 
     loop = _network()
 
     async def main() -> None:
         running: Any = asyncio.get_running_loop()
-        with pytest.raises(SimulationFenceError, match="create_connection"):
+        context = ssl.create_default_context()
+        with pytest.raises(SimulationFenceError, match="local_addr"):
             await running.create_connection(
-                asyncio.Protocol, "server", 9000, ssl=object()
+                asyncio.Protocol, "server", 9000, local_addr=("client", 0)
+            )
+        with pytest.raises(SimulationFenceError, match="family"):
+            await running.create_connection(
+                asyncio.Protocol, "server", 9000, family=socket.AF_INET6
+            )
+        with pytest.raises(SimulationFenceError, match="create_datagram_endpoint"):
+            await running.create_datagram_endpoint(
+                asyncio.DatagramProtocol, local_addr=("0.0.0.0", 9001), ssl=context
             )
 
     try:
-        loop.run_until_complete(main())
+        loop.run_until_complete(loop.net.host("client").create_task(main()))
     finally:
         loop.close()
 

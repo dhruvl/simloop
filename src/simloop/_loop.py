@@ -59,7 +59,8 @@ def _fence(api: str) -> NoReturn:
 
 
 def _reject_kwargs(api: str, kwargs: dict[str, Any]) -> None:
-    # Optional stdlib arguments (ssl, sock, interface selectors, ...) reach
+    # Whatever is left after the simulated arguments have been taken —
+    # interface selectors, address-family choices, connection racing — reaches
     # outside the simulation; anything actually requested must fail loudly.
     for name, value in kwargs.items():
         if value:
@@ -673,8 +674,28 @@ class SimLoop(asyncio.AbstractEventLoop):
         port: Any = None,
         **kwargs: Any,
     ) -> Any:
+        ssl_arg = kwargs.pop("ssl", None)
+        server_hostname = kwargs.pop("server_hostname", None)
+        handshake_timeout = kwargs.pop("ssl_handshake_timeout", None)
+        shutdown_timeout = kwargs.pop("ssl_shutdown_timeout", None)
         sock = kwargs.pop("sock", None)
         _reject_kwargs("create_connection", kwargs)
+        # The stdlib's argument rules, checked against the host the caller
+        # named rather than the one a parked socket carries: a certificate is
+        # verified against the name the caller asked for, never one inferred
+        # on their behalf.
+        if server_hostname is not None and not ssl_arg:
+            raise ValueError("server_hostname is only meaningful with ssl")
+        if server_hostname is None and ssl_arg:
+            if not host:
+                raise ValueError(
+                    "You must set server_hostname when using ssl without a host"
+                )
+            server_hostname = host
+        if handshake_timeout is not None and not ssl_arg:
+            raise ValueError("ssl_handshake_timeout is only meaningful with ssl")
+        if shutdown_timeout is not None and not ssl_arg:
+            raise ValueError("ssl_shutdown_timeout is only meaningful with ssl")
         if sock is not None:
             # The stdlib treats a passed-in socket as already connected and
             # takes ownership of it. Here "connected" means sock_connect
@@ -691,7 +712,20 @@ class SimLoop(asyncio.AbstractEventLoop):
                 )
             sock.close()
             host, port = target
-        return await self._net._open_connection(protocol_factory, host, port)
+        if not ssl_arg:
+            return await self._net._open_connection(protocol_factory, host, port)
+        from simloop import _tls
+
+        return await _tls.connect(
+            self,
+            protocol_factory,
+            host,
+            port,
+            _tls.context(ssl_arg, server_side=False),
+            server_hostname,
+            handshake_timeout,
+            shutdown_timeout,
+        )
 
     async def create_server(
         self,
@@ -700,9 +734,54 @@ class SimLoop(asyncio.AbstractEventLoop):
         port: Any = None,
         **kwargs: Any,
     ) -> Any:
+        ssl_arg = kwargs.pop("ssl", None)
+        handshake_timeout = kwargs.pop("ssl_handshake_timeout", None)
+        shutdown_timeout = kwargs.pop("ssl_shutdown_timeout", None)
         kwargs.pop("backlog", None)  # accepted and irrelevant: no accept queue
         _reject_kwargs("create_server", kwargs)
+        if handshake_timeout is not None and not ssl_arg:
+            raise ValueError("ssl_handshake_timeout is only meaningful with ssl")
+        if shutdown_timeout is not None and not ssl_arg:
+            raise ValueError("ssl_shutdown_timeout is only meaningful with ssl")
+        if ssl_arg:
+            from simloop import _tls
+
+            protocol_factory = _tls.server_factory(
+                self,
+                protocol_factory,
+                _tls.context(ssl_arg, server_side=True),
+                handshake_timeout,
+                shutdown_timeout,
+            )
         return await self._net._start_server(protocol_factory, host, port)
+
+    async def start_tls(
+        self,
+        transport: Any,
+        protocol: Any,
+        sslcontext: Any,
+        *,
+        server_side: bool = False,
+        server_hostname: str | None = None,
+        ssl_handshake_timeout: float | None = None,
+        ssl_shutdown_timeout: float | None = None,
+    ) -> Any:
+        """Upgrade an established simulated connection to TLS.
+
+        Returns the new transport the protocol should write to from here.
+        """
+        from simloop import _tls
+
+        return await _tls.upgrade(
+            self,
+            transport,
+            protocol,
+            sslcontext,
+            server_side=server_side,
+            server_hostname=server_hostname,
+            handshake_timeout=ssl_handshake_timeout,
+            shutdown_timeout=ssl_shutdown_timeout,
+        )
 
     async def getaddrinfo(
         self,
@@ -833,9 +912,6 @@ class SimLoop(asyncio.AbstractEventLoop):
 
     def shutdown_default_executor(self, *args: Any, **kwargs: Any) -> Any:
         _fence("shutdown_default_executor")
-
-    def start_tls(self, *args: Any, **kwargs: Any) -> Any:
-        _fence("start_tls")
 
     def sendfile(self, *args: Any, **kwargs: Any) -> Any:
         _fence("sendfile")
