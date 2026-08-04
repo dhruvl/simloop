@@ -119,9 +119,16 @@ Results, recorded 2026-08-04 on the M4 MacBook Air (10 jobs):
 
 | campaign | scale | result |
 |---|---|---|
-| green | 100,000 seeds, 6.3 min, 263.1 seeds/s | green — no invariant violated |
-| ablations | 6 mutations × 10,000 seeds, 2.7 min | every ablation caught, densities below |
-| replay stability | 20 failing seeds × 100 re-runs, 14.2 s | identical trace hash on every run |
+| green | 100,000 seeds, 4.2 min, 394.5 seeds/s | green — no invariant violated |
+| ablations | 6 mutations × 10,000 seeds, 3.0 min | every ablation caught, densities below |
+| replay stability | 20 failing seeds × 100 re-runs, 15.7 s | identical trace hash on every run |
+
+The green row is where the workers' frozen heap shows up: nearly every green
+seed reaches the settle phase and pays the end-of-run collections in full,
+so taking the imported heap out of them moved this number from 263 to 394
+seeds/s in one sitting on this machine. The ablation runs barely moved —
+most of those seeds fail within a few steps and never accumulate the work
+the collection was re-walking.
 
 Per-ablation failure density:
 
