@@ -199,13 +199,22 @@ class SimServer(asyncio.AbstractServer):
         return ()
 
     def close_clients(self) -> None:
-        """Close every connection this server accepted."""
+        """Close every connection this server accepted.
+
+        These reach the connection underneath, so on a TLS server the peer
+        gets the teardown without a close-notify first — which is what an
+        abrupt server-side hangup looks like anyway.
+        """
         for transport in list(self._net._streams.values()):
             if transport._local == (self._host, self._port):
                 transport.close()
 
     def abort_clients(self) -> None:
-        """Reset every connection this server accepted."""
+        """Reset every connection this server accepted.
+
+        A reset on a TLS connection sends no close-notify either, which is
+        exactly what a reset means.
+        """
         for transport in list(self._net._streams.values()):
             if transport._local == (self._host, self._port):
                 transport.abort()
