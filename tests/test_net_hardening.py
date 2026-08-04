@@ -39,6 +39,32 @@ def _run_child(seed: int, hashseed: str | None) -> str:
     return result.stdout.strip()
 
 
+# Captured before write-side flow control existed. The reference workload
+# never arms it, and a run that does not ask for it has to decide exactly what
+# it decided before — including every fault draw, so a recorded seed a user
+# already has still replays.
+_RECORDED = {
+    0: (
+        "d9b64b9f0908ec4ccd605340c35bfe0a140fbdb1c4e5a70cf4e0bf2631b7fd4d "
+        "1354346b843e86108cfbf6729db26e95458f1fbae99964c85952f04ed4e44bf8"
+    ),
+    1: (
+        "e5c891d7618f7a15cb571c6dc567f2b2505dfdfb70e8bed9dc99978a28827f1b "
+        "67f19e5ed9bf9cc797540e040d43b0c9c92848deb2ba226dc7866a7e4052da4e"
+    ),
+    2: (
+        "6784369a11bfa7dc6f998ff3b606a0b56b0d1d3d55005acabdea44c6e7980b9e "
+        "6a9362b769406c2ddc58bb5dcadac8ddf0b5e86da72fee78edf9e15f67adb748"
+    ),
+}
+
+
+def test_flow_control_off_reproduces_the_recorded_runs() -> None:
+    workload = _load_workload()
+    for seed, recorded in _RECORDED.items():
+        assert workload.run(seed) == recorded, f"seed {seed} no longer replays"
+
+
 def test_same_seed_replays_identically() -> None:
     workload = _load_workload()
     for seed in range(3):
