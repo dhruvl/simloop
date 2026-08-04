@@ -7,7 +7,7 @@ from simloop._sim import Sim, sim
 from simloop._timeline import timeline_html
 from simloop._trace import TraceEvent
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "Host",
