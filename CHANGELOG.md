@@ -2,6 +2,28 @@
 
 ## 0.2.0 (unreleased)
 
+- TLS runs inside the simulation. `create_connection(ssl=...)`,
+  `create_server(ssl=...)` and `start_tls` on an already-established
+  connection all work, and so do `asyncio.open_connection` and `start_server`
+  on top of them. The handshake is the real thing — the standard library's
+  `SSLProtocol` driving OpenSSL over a pair of memory BIOs, with real
+  certificate verification, so a hostname the certificate does not cover
+  raises `ssl.SSLCertVerificationError` — and no file descriptor, no real
+  socket and no wall-clock second is involved anywhere. Each flight OpenSSL
+  produces leaves as one ordinary simulated packet and pays the link's seeded
+  latency, so a client connect costs two round trips; `ssl_handshake_timeout`
+  and `ssl_shutdown_timeout` are ordinary loop timers, so a handshake a
+  partition stalls costs sixty virtual seconds and milliseconds of real ones.
+  aiohttp's `https://`, httpx's `https://` and websockets' `wss://` now run
+  under simulation, with the evidence in
+  [docs/compatibility.md](docs/compatibility.md). The caveat, stated plainly:
+  for a workload that uses TLS the hash promise gains two clauses — same
+  OpenSSL build, same TLS configuration — because the number of packets a
+  handshake makes is a property of the engine. Certificates are not among
+  them, measured: an EC leaf and an RSA leaf record the same hash, since the
+  trace records how many packets crossed and in what order, never their
+  bytes. A run that never asks for TLS is unaffected, which pinned reference
+  digests keep true.
 - `drain()` can finally block. `loop.net.set_flow_control()` gives stream
   transports a write buffer that holds every byte written but not yet
   received by the peer's protocol — still in flight, held by a partition,
