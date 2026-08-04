@@ -5,7 +5,8 @@ simulates. This page answers the next question — what happens when a real
 library runs on top of them — with evidence rather than intent: every row
 below is the output of a script anyone can re-run.
 
-Recorded **2026-08-01**, against simloop 0.2.0 (unreleased) on Python 3.12.
+Recorded **2026-08-04**, against simloop 0.2.0 (unreleased) on Python 3.12
+with OpenSSL 3.5.7.
 
 ## What a probe is
 
@@ -23,8 +24,9 @@ network — and reports a single verdict:
 A verdict is a statement about that one run and nothing more. `works` means
 those calls, on that version, produced that result; it is not a support
 claim, and the same library may well fence one call later. The probes drive
-happy paths only: no TLS, no retries, no reconnection, no concurrency beyond
-what the probe itself starts.
+happy paths only: no retries, no reconnection, no concurrency beyond what the
+probe itself starts. TLS is a happy path they now drive, with certificates
+minted in memory for the sim hostnames the probes use.
 
 ## Regenerating the table
 
@@ -46,8 +48,11 @@ carries a date instead.
 | anyio | 4.14.2 | works: task group, memory object stream (one, two, three), anyio.sleep and move_on_after; virtual clock reached 1.75s | Asyncio backend only; nothing here touches a socket. |
 | redis (RESP wire protocol) | n/a | works: PING, SET and GET round trips over one connection: ['+PONG', '+OK', '0'] | Hand-rolled RESP over sim streams; no client library, no real server. |
 | websockets | 17.0.1 | works: handshake, one echoed frame ('HELLO') and close over ws:// | asyncio server and client on two sim hosts, ws:// only. |
+| websockets (wss) | 17.0.1 | works: handshake, one echoed frame ('HELLO') and close over wss:// | asyncio server and client on two sim hosts, over wss://. |
 | aiohttp (client) | 3.14.3 | works: ClientSession GET returned 'hello from the simulation' | ClientSession GET at a sim host answered by a raw stream server. |
+| aiohttp (client, https) | 3.14.3 | works: ClientSession GET over https returned 'hello from the simulation' | ClientSession GET over https at a sim host with a minted certificate. |
 | httpx | 0.28.1 | works: AsyncClient GET returned 'hello from the simulation' | AsyncClient GET at a sim host answered by a raw stream server. |
+| httpx (https) | 0.28.1 | works: AsyncClient GET over https returned 'hello from the simulation' | AsyncClient GET over https; the TLS engine is anyio's, not the loop's. |
 
 Rows are grouped: the libraries that need nothing but the loop and its
 streams first, then the client stacks that expect a socket object
@@ -104,8 +109,8 @@ on it. A transport with no operating-system socket now answers with a
 stand-in that reports the peer's synthetic address and port, so the
 introspection succeeds and the response body comes back.
 
-Both client probes make one request against a responder that sends
-`Connection: close`, so neither row says anything about connection reuse.
+Every client probe makes one request against a responder that sends
+`Connection: close`, so no row says anything about connection reuse.
 The piece a pool depends on is the descriptor `fileno()` returns: httpcore
 polls it to decide whether a pooled connection has died, and the
 simulation backs it with a parked descriptor the transport owns, which
@@ -114,32 +119,37 @@ peer's EOF arrives; a reset or a teardown closes it and `fileno()` returns
 `-1`, which the same poll reads as dead just as well. That contract is
 pinned by the test suite, not by these rows.
 
-Both client rows are `http://` only, and the two stacks stop differently
-on `https://`. aiohttp asks for TLS through `create_connection(ssl=...)`,
-which fences:
+**aiohttp over `https://`** completes the same two-call connect its
+`http://` path uses, with `ssl` and `server_hostname` riding alongside
+`sock` in the `create_connection` call. What the connector does after the
+connect is answered by the two layers together: `sslcontext` and
+`ssl_object` come from the TLS layer, `peername` and the `setsockopt` on
+the stand-in socket from the simulated transport underneath it. The
+certificate is minted for the sim hostname `web` and the client context
+trusts that authority and nothing else, so the row says OpenSSL really
+verified rather than that verification was turned off.
 
-```
-simloop does not simulate 'create_connection(ssl=...)'; see docs/supported-api.md for the supported asyncio subset
-```
+**httpx over `https://`** reaches no loop TLS API at all, which is why it
+is worth its own row. httpcore wraps the byte stream with anyio's
+`TLSStream`, which drives an `ssl` memory BIO inside the process and sends
+the handshake as ordinary bytes over the simulated connection. Nothing in
+simloop is involved in that handshake; what changed is that the simulation
+now has a peer on the other end that speaks TLS back, so the request
+completes instead of dying of httpx's own `ConnectTimeout`.
 
-httpx reaches no fence. httpcore wraps the byte stream with anyio's
-`TLSStream`, which drives an `ssl` memory BIO inside the process and
-sends the handshake as ordinary bytes over the simulated connection, so
-`loop.start_tls` is never called and nothing stops the attempt. Where it
-ends is up to whatever is listening: aimed at the plaintext responder
-these probes use, the handshake goes unanswered and the request dies of
-httpx's own `ConnectTimeout`. That timeout is a one-off measurement
-rather than a row — no probe on this page requests `https://`.
+**websockets over `wss://`** completes a handshake, echoes a frame and
+closes with both ends inside the simulation. It is the only row that
+drives `create_server(ssl=...)` and `create_connection(ssl=...)` in one
+run.
 
 ## Not tested
 
 - **asyncpg**: reaching its first fence needs a live PostgreSQL server to
   connect to, which no probe can provide; it is untested rather than
   fenced-or-not.
-- **TLS anywhere**: no probe on this page requests `https://` or `wss://`.
-  simloop fences `start_tls` and `create_connection(ssl=...)`, but a stack
-  that runs its handshake in memory reaches neither — it reaches a simulated
-  network with nothing on it that speaks TLS unless the test puts it there.
+- **The rest of TLS**: the three TLS rows drive a server certificate, one
+  cipher suite and TLS 1.3. Client certificates, a peer restricted to TLS
+  1.2, ALPN and h2 negotiation, and session resumption are not probed.
 - Anything that reaches outside the loop by design — threads, subprocesses,
   signals, real DNS. Those are fences, listed in
   [docs/supported-api.md](supported-api.md), not compatibility questions.

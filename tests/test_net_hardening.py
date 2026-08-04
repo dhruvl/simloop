@@ -39,10 +39,12 @@ def _run_child(seed: int, hashseed: str | None) -> str:
     return result.stdout.strip()
 
 
-# Captured before write-side flow control existed. The reference workload
-# never arms it, and a run that does not ask for it has to decide exactly what
-# it decided before — including every fault draw, so a recorded seed a user
-# already has still replays.
+# What each seed recorded before the features that came after it: seeds 0-2
+# predate write-side flow control, seed 7 predates TLS. The reference workload
+# asks for neither, and a run that does not ask for a feature has to decide
+# exactly what it decided without it — including every fault draw, so a
+# recorded seed a user already has still replays. A deliberate change to the
+# trace format updates these and says so in the changelog.
 _RECORDED = {
     0: (
         "d9b64b9f0908ec4ccd605340c35bfe0a140fbdb1c4e5a70cf4e0bf2631b7fd4d "
@@ -56,10 +58,14 @@ _RECORDED = {
         "6784369a11bfa7dc6f998ff3b606a0b56b0d1d3d55005acabdea44c6e7980b9e "
         "6a9362b769406c2ddc58bb5dcadac8ddf0b5e86da72fee78edf9e15f67adb748"
     ),
+    7: (
+        "90a298401635eb8eefbab0d4c6c70cd420e0e364cb38554599c15946e7eddc67 "
+        "fdf6002b5f7c3a0a8f67f52051c22cbc4789ea8dda8b47313aa890f88a495134"
+    ),
 }
 
 
-def test_flow_control_off_reproduces_the_recorded_runs() -> None:
+def test_the_recorded_runs_still_replay() -> None:
     workload = _load_workload()
     for seed, recorded in _RECORDED.items():
         assert workload.run(seed) == recorded, f"seed {seed} no longer replays"

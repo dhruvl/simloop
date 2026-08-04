@@ -195,6 +195,11 @@ class _SimStreamTransport(asyncio.Transport):
     None of it applies until ``net.set_flow_control()`` arms it.
     """
 
+    # asyncio's start_tls refuses a transport that does not advertise this;
+    # the pause/resume/set_protocol/_force_close contract it relies on is
+    # implemented below.
+    _start_tls_compatible = True
+
     def __init__(
         self, net: SimNetwork, conn: int, local: _Addr, remote: _Addr
     ) -> None:
@@ -204,6 +209,7 @@ class _SimStreamTransport(asyncio.Transport):
         self._local = local
         self._remote = remote
         self._protocol: Any = None
+        self._buffered = False
         self._out_seq = 1  # seq 0 was this direction's handshake packet
         self._closing = False
         self._closed = False
@@ -220,8 +226,16 @@ class _SimStreamTransport(asyncio.Transport):
         self._peer_closed = False  # the peer's FIN or RST has arrived
 
     def _begin(self, protocol: Any) -> None:
-        self._protocol = protocol
+        self._adopt(protocol)
         protocol.connection_made(self)
+
+    def _adopt(self, protocol: Any) -> None:
+        # One place decides how a protocol is fed, because start_tls swaps the
+        # protocol on a live transport and the two entry points must not drift.
+        # asyncio's SSLProtocol is a BufferedProtocol: it is handed bytes
+        # through a buffer it owns rather than through data_received.
+        self._protocol = protocol
+        self._buffered = isinstance(protocol, asyncio.BufferedProtocol)
 
     # ------------------------------------------------------------------
     # Outbound
@@ -274,12 +288,21 @@ class _SimStreamTransport(asyncio.Transport):
             self._send("fin")
         self._net._loop.call_soon(self._finish, None)
 
-    def abort(self) -> None:
+    def _force_close(self, exc: Exception | None) -> None:
+        """Tear the connection down now, reporting ``exc`` to the protocol.
+
+        asyncio's SSLProtocol calls this on the transport beneath it when a
+        handshake fails or an application aborts: the same reset ``abort``
+        sends, with the failure carried into connection_lost instead of None.
+        """
         if self._closed:
             return
         self._closing = True
         self._send("rst")
-        self._net._loop.call_soon(self._finish, None)
+        self._net._loop.call_soon(self._finish, exc)
+
+    def abort(self) -> None:
+        self._force_close(None)
 
     def _finish(self, exc: Exception | None) -> None:
         if self._closed:
@@ -296,6 +319,7 @@ class _SimStreamTransport(asyncio.Transport):
         if self._extra_socket is not None:
             self._extra_socket._dispose()
         protocol, self._protocol = self._protocol, None
+        self._buffered = False
         if protocol is not None:
             protocol.connection_lost(exc)
 
@@ -391,13 +415,33 @@ class _SimStreamTransport(asyncio.Transport):
     # Inbound (called by the network, already in seq order)
     # ------------------------------------------------------------------
 
+    def _deliver(self, data: bytes) -> None:
+        """Hand one packet's bytes to the protocol, however it takes them."""
+        if not self._buffered:
+            self._protocol.data_received(data)
+            return
+        # The standard library's asyncio.protocols._feed_data_to_buffered_proto,
+        # written out rather than imported: get_buffer may answer with less room
+        # than the packet holds, and an empty buffer is a protocol bug rather
+        # than a zero-length write, so it must be said out loud.
+        view = memoryview(data)
+        while view:
+            buffer = self._protocol.get_buffer(len(view))
+            room = len(buffer)
+            if not room:
+                raise RuntimeError("get_buffer() returned an empty buffer")
+            taken = min(room, len(view))
+            buffer[:taken] = view[:taken]
+            self._protocol.buffer_updated(taken)
+            view = view[taken:]
+
     def _data_arrived(self, data: bytes) -> None:
         if self._closed:
             return
         if self._read_paused:
             self._backlog.append(data)
             return
-        self._protocol.data_received(data)
+        self._deliver(data)
         # Credited after the call, not before: the sender is released only once
         # the receiving protocol has finished with the bytes.
         self._consumed(len(data))
@@ -440,7 +484,7 @@ class _SimStreamTransport(asyncio.Transport):
         self._read_paused = False
         while self._backlog and not self._read_paused and not self._closed:
             chunk = self._backlog.pop(0)
-            self._protocol.data_received(chunk)
+            self._deliver(chunk)
             # Per chunk, so a protocol that pauses again mid-drain leaves the
             # rest of the backlog charged to the sender.
             self._consumed(len(chunk))
@@ -475,7 +519,7 @@ class _SimStreamTransport(asyncio.Transport):
         return default
 
     def set_protocol(self, protocol: Any) -> None:
-        self._protocol = protocol
+        self._adopt(protocol)
 
     def get_protocol(self) -> Any:
         return self._protocol

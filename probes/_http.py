@@ -26,6 +26,9 @@ async def respond(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) ->
     await reader.readuntil(b"\r\n\r\n")
     writer.write(RESPONSE)
     await writer.drain()
-    writer.write_eof()
+    # TLS has no half-close, so a TLS transport refuses one; the close below
+    # is what ends the response there.
+    if writer.can_write_eof():
+        writer.write_eof()
     writer.close()
     await writer.wait_closed()

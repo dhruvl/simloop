@@ -38,6 +38,10 @@ a host belong to an implicit `driver` host.
 | API | Behavior under simulation |
 |---|---|
 | `loop.create_connection` / `create_server`, `asyncio.open_connection` / `start_server` | Real transports and protocols over reliable, ordered in-memory streams; connecting costs one round trip of virtual latency; connecting to a closed port raises `ConnectionRefusedError` |
+| `loop.create_connection(ssl=...)` / `create_server(ssl=...)`, `asyncio.open_connection(ssl=...)` / `start_server(ssl=...)` | A real TLS handshake, driven by the standard library's `SSLProtocol` over a pair of memory BIOs. No descriptor and no real socket anywhere: each flight OpenSSL produces leaves as one ordinary simulated packet and pays the link's seeded latency, so a client connect costs two round trips — one for the connection, one for the handshake — which is what a real TCP + TLS 1.3 connect costs. Verification is the real thing: a hostname the certificate does not cover raises `ssl.SSLCertVerificationError`. `ssl=True` means the standard library's default client context, which trusts the system store and therefore rejects a simulation's own certificate; on a server it is a `ValueError` when the listener is created, since there is no default certificate to present. A handshake a client fails is reset and does not fail the run |
+| `loop.start_tls` | Upgrades an established simulated connection in place and returns the new transport the protocol should write to — including the server-side case where the stream reader has already buffered the bytes the handshake needs |
+| `ssl_handshake_timeout` / `ssl_shutdown_timeout` | Ordinary loop timers, so they fire in virtual time at the standard library's defaults of 60 s and 30 s. A handshake a partition stalls costs sixty virtual seconds and milliseconds of wall clock, and raises `ConnectionAbortedError` |
+| `transport.get_extra_info` on a TLS transport | `ssl_object`, `peercert`, `cipher`, `compression` and `sslcontext` come from the TLS layer; `socket`, `peername` and `sockname` fall through to the simulated transport underneath, so the stand-in socket row below still applies |
 | `loop.create_datagram_endpoint` | Unreliable messaging: per-link drop, duplication, and latency apply per datagram |
 | `loop.net.set_defaults` / `set_link` | Per-direction latency ranges, drop and duplication probabilities, drawn from a seed-derived stream |
 | `loop.net.partition` / `heal` | Silent blackhole: datagrams are lost, stream traffic is held and resumes intact after healing; nothing errors — only your own timeouts fire |
@@ -73,25 +77,28 @@ so skewing a worker changes nothing the cluster decides. Clock faults
 reach only code that compares timestamps taken on different machines.
 
 Limitations, stated honestly: there is no retransmission or congestion model
-— streams are reliable by construction; and addressing is IPv4-only and
-entirely synthetic — there are no routes, no netmasks, and no service-name
-database.
+— streams are reliable by construction; addressing is IPv4-only and entirely
+synthetic — there are no routes, no netmasks, and no service-name database;
+TLS has no half-close, so `write_eof()` on a TLS transport raises
+`NotImplementedError` and `can_write_eof()` is `False`, exactly as on a real
+one; and DTLS is not simulated — datagram endpoints take no TLS arguments.
 
 ## Fenced
 
 Anything that reaches outside the simulation raises `SimulationFenceError`:
 real threads (`call_soon_threadsafe` from any thread but the loop's own),
 signal handlers, subprocesses, file-descriptor callbacks (`add_reader` /
-`add_writer`), loop-level TLS upgrades (`start_tls`,
-`create_connection(ssl=...)`), `sendfile`, pipes, and an eager task start
+`add_writer`), `sendfile`, pipes, and an eager task start
 (`create_task(eager_start=True)`), which would run a task's first step at
 creation time, before the seeded draw could order it against anything.
 Executor *submissions* are not in that list — `run_in_executor` runs the
 function inline, as the table above says — but the pool machinery around
 them still is: `set_default_executor` and `shutdown_default_executor`
 fence, because an executor that would never be used is refused rather than
-silently accepted. TLS a library performs in memory reaches no loop API
-and so reaches no fence; what that means in practice is in
+silently accepted. TLS is not in that list either, on either of its two
+routes: through the loop, as the table above describes, and inside a
+library's own memory BIO, which reaches no loop API at all and now finds a
+simulated peer that speaks TLS. What that means in practice is in
 [docs/compatibility.md](compatibility.md).
 
 The socket calls are fenced with one exception. `sock_connect` on an
@@ -146,6 +153,22 @@ and the `deliver` events are new in 0.2.0, so every workload's trace hashes
 differ from the ones 0.1.0 recorded — see the
 [changelog](../CHANGELOG.md). What a hash promises is unchanged: same seed,
 same code, same interpreter, same hash.
+
+TLS costs that promise one clause, and only for a workload that uses it. TLS
+records add no event kind — they are ordinary packets — but how many packets
+a handshake makes is a property of the TLS engine, so for such a workload the
+promise reads *same seed, same code, same interpreter, same OpenSSL build,
+same TLS configuration*. Certificates are not on that list, which is the
+reassuring half and is measured: an EC leaf and an RSA leaf record the
+same hash, because the trace hashes the number and order of packets and never
+their bytes, and the TLS engine emits exactly one write per flight. What does
+move it is anything that changes the flight structure — `SSLContext.num_tickets`
+(setting it to 0 drops one server packet from a connection that stays open
+long enough to be sent its session tickets; raising it above the default of 2
+changes nothing, because they all leave in one write), a client certificate
+request, a peer that only speaks TLS 1.2. A run that
+never asks for TLS makes no new draw, arms no new timer and records no new
+event, which a pinned reference hash in the test suite keeps true.
 
 `simloop.timeline_html(events, limit=5000)` renders a trace as a
 self-contained HTML page — one lane per machine plus one for the simulation,

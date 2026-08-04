@@ -320,6 +320,204 @@ def test_server_abort_clients_resets_the_peer() -> None:
     assert isinstance(lost[0], ConnectionResetError)
 
 
+class _Buffered(asyncio.BufferedProtocol):
+    """Records what each get_buffer/buffer_updated pair was handed.
+
+    ``room`` is how much space it offers, so a value smaller than a packet
+    forces the delivery loop to fill it more than once.
+    """
+
+    def __init__(self, room: int = 4096) -> None:
+        self._room = room
+        self._buffer = bytearray(max(room, 1))
+        self.transport: Any = None
+        self.chunks: list[bytes] = []
+        self.lost: list[BaseException | None] = []
+
+    def connection_made(self, transport: Any) -> None:
+        self.transport = transport
+
+    def get_buffer(self, sizehint: int) -> memoryview:
+        return memoryview(self._buffer)[: self._room]
+
+    def buffer_updated(self, nbytes: int) -> None:
+        self.chunks.append(bytes(self._buffer[:nbytes]))
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        self.lost.append(exc)
+
+
+def _exchange(loop: SimLoop, factory: Any, writes: list[bytes]) -> None:
+    """Serve ``factory`` on host ``server`` and write each packet to it."""
+
+    async def main() -> None:
+        running = asyncio.get_running_loop()
+
+        async def serve() -> None:
+            server = await running.create_server(factory, "0.0.0.0", 9000)
+            async with server:
+                await asyncio.sleep(10.0)
+
+        async def send() -> None:
+            transport, _ = await running.create_connection(
+                asyncio.Protocol, "server", 9000
+            )
+            for payload in writes:
+                transport.write(payload)
+            await asyncio.sleep(1.0)
+            transport.close()
+
+        serve_task = loop.net.host("server").create_task(serve())
+        await asyncio.sleep(0.01)
+        await loop.net.host("client").create_task(send())
+        await asyncio.sleep(1.0)
+        await _reap(serve_task)
+
+    loop.run_until_complete(main())
+
+
+def test_a_buffered_protocol_is_fed_one_packet_at_a_time() -> None:
+    loop = _network()
+    protocol = _Buffered()
+
+    try:
+        _exchange(loop, lambda: protocol, [b"one", b"two"])
+    finally:
+        loop.close()
+    assert protocol.chunks == [b"one", b"two"]
+
+
+def test_a_short_buffer_is_filled_in_successive_chunks() -> None:
+    loop = _network()
+    protocol = _Buffered(room=2)
+
+    try:
+        _exchange(loop, lambda: protocol, [b"abcdef"])
+    finally:
+        loop.close()
+    assert protocol.chunks == [b"ab", b"cd", b"ef"]
+    assert b"".join(protocol.chunks) == b"abcdef"
+
+
+def test_an_empty_buffer_is_reported_as_a_protocol_bug() -> None:
+    loop = _network()
+    protocol = _Buffered(room=0)
+
+    try:
+        with pytest.raises(RuntimeError, match="empty buffer"):
+            _exchange(loop, lambda: protocol, [b"anything"])
+    finally:
+        loop.close()
+
+
+def test_set_protocol_switches_to_buffered_delivery_mid_stream() -> None:
+    loop = _network()
+    buffered = _Buffered()
+    plain: list[bytes] = []
+
+    class Switcher(asyncio.Protocol):
+        def __init__(self) -> None:
+            self.transport: Any = None
+
+        def connection_made(self, transport: Any) -> None:
+            self.transport = transport
+
+        def data_received(self, data: bytes) -> None:
+            plain.append(data)
+            self.transport.set_protocol(buffered)
+
+    try:
+        _exchange(loop, Switcher, [b"before", b"after"])
+    finally:
+        loop.close()
+    assert plain == [b"before"]
+    assert buffered.chunks == [b"after"]
+
+
+def test_a_paused_backlog_drains_through_the_buffered_path() -> None:
+    loop = _network()
+
+    class Paused(_Buffered):
+        def connection_made(self, transport: Any) -> None:
+            super().connection_made(transport)
+            transport.pause_reading()
+
+    protocol = Paused()
+
+    async def main() -> None:
+        running = asyncio.get_running_loop()
+
+        async def serve() -> None:
+            server = await running.create_server(lambda: protocol, "0.0.0.0", 9000)
+            async with server:
+                await asyncio.sleep(10.0)
+
+        async def send() -> None:
+            transport, _ = await running.create_connection(
+                asyncio.Protocol, "server", 9000
+            )
+            transport.write(b"held")
+            transport.write(b"too")
+            await asyncio.sleep(1.0)
+            transport.close()
+
+        serve_task = loop.net.host("server").create_task(serve())
+        await asyncio.sleep(0.01)
+        send_task = loop.net.host("client").create_task(send())
+        await asyncio.sleep(0.5)
+        assert protocol.chunks == []
+        protocol.transport.resume_reading()
+        await send_task
+        await asyncio.sleep(1.0)
+        await _reap(serve_task)
+
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()
+    assert protocol.chunks == [b"held", b"too"]
+
+
+def test_force_close_reports_the_failure_and_resets_the_peer() -> None:
+    loop = _network()
+    failure = ConnectionAbortedError("handshake gave up")
+    client_lost: list[BaseException | None] = []
+    server_lost: list[BaseException | None] = []
+
+    class Client(asyncio.Protocol):
+        def connection_lost(self, exc: Exception | None) -> None:
+            client_lost.append(exc)
+
+    class Server(asyncio.Protocol):
+        def connection_lost(self, exc: Exception | None) -> None:
+            server_lost.append(exc)
+
+    async def main() -> None:
+        running: Any = asyncio.get_running_loop()
+
+        async def serve() -> None:
+            server = await running.create_server(Server, "0.0.0.0", 9000)
+            async with server:
+                await asyncio.sleep(10.0)
+
+        async def connect_and_fail() -> None:
+            transport, _ = await running.create_connection(Client, "server", 9000)
+            transport._force_close(failure)
+
+        serve_task = loop.net.host("server").create_task(serve())
+        await asyncio.sleep(0.01)
+        await loop.net.host("client").create_task(connect_and_fail())
+        await asyncio.sleep(0.5)
+        await _reap(serve_task)
+
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()
+    assert client_lost == [failure]
+    assert len(server_lost) == 1 and isinstance(server_lost[0], ConnectionResetError)
+
+
 def test_duplicate_bind_and_foreign_bind_are_rejected() -> None:
     loop = _network()
 
@@ -341,20 +539,72 @@ def test_duplicate_bind_and_foreign_bind_are_rejected() -> None:
         loop.close()
 
 
-def test_ssl_arguments_are_fenced() -> None:
+def test_ssl_arguments_are_checked_the_way_the_stdlib_checks_them() -> None:
+    import ssl
+
+    loop = _network()
+
+    async def main() -> None:
+        running: Any = asyncio.get_running_loop()
+        with pytest.raises(TypeError, match="'object'"):
+            await running.create_connection(
+                asyncio.Protocol, "server", 9000, ssl=object()
+            )
+        with pytest.raises(ValueError, match="server_hostname"):
+            await running.create_connection(
+                asyncio.Protocol, "server", 9000, server_hostname="server"
+            )
+        with pytest.raises(ValueError, match="server_hostname"):
+            await running.create_connection(
+                asyncio.Protocol, ssl=ssl.create_default_context(), sock=object()
+            )
+        with pytest.raises(ValueError, match="ssl_handshake_timeout"):
+            await running.create_connection(
+                asyncio.Protocol, "server", 9000, ssl_handshake_timeout=1.0
+            )
+        with pytest.raises(ValueError, match="ssl_shutdown_timeout"):
+            await running.create_connection(
+                asyncio.Protocol, "server", 9000, ssl_shutdown_timeout=1.0
+            )
+        with pytest.raises(ValueError, match="valid SSLContext"):
+            await running.create_server(asyncio.Protocol, "0.0.0.0", 9000, ssl=True)
+        with pytest.raises(ValueError, match="ssl_handshake_timeout"):
+            await running.create_server(
+                asyncio.Protocol, "0.0.0.0", 9000, ssl_handshake_timeout=1.0
+            )
+
+    try:
+        loop.run_until_complete(loop.net.host("server").create_task(main()))
+    finally:
+        loop.close()
+
+
+def test_the_fence_did_not_get_wider_than_tls() -> None:
+    import socket
+    import ssl
+
     from simloop import SimulationFenceError
 
     loop = _network()
 
     async def main() -> None:
         running: Any = asyncio.get_running_loop()
-        with pytest.raises(SimulationFenceError, match="create_connection"):
+        context = ssl.create_default_context()
+        with pytest.raises(SimulationFenceError, match="local_addr"):
             await running.create_connection(
-                asyncio.Protocol, "server", 9000, ssl=object()
+                asyncio.Protocol, "server", 9000, local_addr=("client", 0)
+            )
+        with pytest.raises(SimulationFenceError, match="family"):
+            await running.create_connection(
+                asyncio.Protocol, "server", 9000, family=socket.AF_INET6
+            )
+        with pytest.raises(SimulationFenceError, match="create_datagram_endpoint"):
+            await running.create_datagram_endpoint(
+                asyncio.DatagramProtocol, local_addr=("0.0.0.0", 9001), ssl=context
             )
 
     try:
-        loop.run_until_complete(main())
+        loop.run_until_complete(loop.net.host("client").create_task(main()))
     finally:
         loop.close()
 

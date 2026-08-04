@@ -283,8 +283,8 @@ and the campaign results:
 
 Code that goes through the event-loop API is supported; code that
 bypasses it is fenced: threads, raw socket reads and writes,
-subprocesses, signals, and loop-level TLS upgrades raise
-`SimulationFenceError` rather than silently breaking determinism.
+subprocesses and signals raise `SimulationFenceError` rather than
+silently breaking determinism.
 Executor submissions stay inside the line: `run_in_executor` runs the
 function inline at a seeded scheduling step — no pool, no thread — so
 `asyncio.to_thread` works, and `call_soon_threadsafe` is `call_soon`
@@ -296,6 +296,11 @@ simulated, so a client that connects a socket and hands it to
 Name resolution stays inside the simulation: `getaddrinfo` resolves sim
 host names to stable synthetic addresses and raises `socket.gaierror` for
 anything else — no real DNS, ever.
+TLS runs inside the simulation: a real handshake through the standard
+library's `SSLProtocol` over a pair of memory BIOs, with real certificate
+verification, no descriptor and no wall clock — each flight is one
+simulated packet paying the link's latency, and a handshake deadline fires
+in virtual time.
 Write-side flow control is simulated on request: `net.set_flow_control()`
 makes `drain()` really wait while the peer has not read, so backpressure
 deadlocks and missing pause/resume handling become findable. It is off by

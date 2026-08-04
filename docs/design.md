@@ -136,9 +136,10 @@ production.
 
 Anything that would reach outside the simulation — real threads,
 signals, subprocesses, raw sockets, `add_reader`/`add_writer`,
-TLS, pipes, `sendfile` — raises `SimulationFenceError` naming the exact call,
-and optional stdlib kwargs that would smuggle those in (`ssl=`, `sock=`, …)
-are rejected the same way.
+pipes, `sendfile` — raises `SimulationFenceError` naming the exact call,
+and an optional stdlib argument that would smuggle one in is rejected the
+same way: whatever is left after the simulated arguments have been taken and
+is actually asked for fences rather than being quietly ignored.
 
 The tempting alternative was best-effort passthrough: hand `run_in_executor`
 a real thread pool, keep most libraries importable, appear more compatible.
@@ -256,10 +257,37 @@ Decisions inside that model, each doing real work:
   `datagram_received` belongs to the receiving machine, and `crash` knows
   exactly which tasks to kill.
 
-What was cut, deliberately: retransmission and congestion modeling, IP
-addresses, TLS. Each would deepen the simulation without widening the class
-of bugs it can catch; the supported-subset contract beats chasing 100% of
-the asyncio surface.
+What was cut, deliberately: retransmission and congestion modeling. It would
+deepen the simulation without widening the class of bugs it can catch; the
+supported-subset contract beats chasing 100% of the asyncio surface.
+
+## TLS: real bytes, and what that costs the hash
+
+The handshake is the standard library's `SSLProtocol` over a pair of memory
+BIOs — the same machinery uvloop reuses — because a hand-rolled pump would
+have to re-derive waiter semantics, handshake and shutdown deadlines,
+close-notify handling and flow-control passthrough, and would get one of them
+wrong. The transport underneath it gained exactly three things: a buffered
+delivery path, a `_force_close` that carries a failure into
+`connection_lost`, and the flag `start_tls` insists on before it will touch a
+transport at all.
+
+Its wire bytes are genuinely random and differ every run. That is affordable
+because the trace does not hash payloads — only the number and order of
+packets and callbacks — and because `SSLProtocol` drains its outgoing BIO
+once per flight, so one flight is one write is one simulated packet. A
+certificate's size and key type therefore leave the hash alone: an EC leaf
+and an RSA leaf record the same one. Anything that changes the flight
+structure does not: a different OpenSSL build, session tickets turned off, a
+peer that only speaks TLS 1.2. So the promise for a TLS workload is one
+clause longer than the promise for everything else, and only for a TLS
+workload — a run that never asks for TLS makes no new draw, arms no new timer
+and records no new event, which a pinned reference hash keeps true.
+
+The handshake pays the wire the way everything else does, which is free
+realism: a client connect costs two round trips of the configured latency,
+and `ssl_handshake_timeout` is an ordinary `call_later`, so a partition that
+outlasts it costs sixty virtual seconds and milliseconds of wall clock.
 
 ## Explorer and pytest plugin: a thin shell by design
 
