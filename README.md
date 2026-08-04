@@ -277,7 +277,7 @@ recording included — about 3.7× faster than the stock loop, which pays a
 selector syscall per iteration), compresses sleep-heavy workloads ~2,000×
 against wall clock, and with `--simloop-jobs` fanning seeds across
 processes, the full jobqueue chaos scenario sweeps 100,000 seeds in just
-over six minutes (~260 seeds/second) on an M4 MacBook Air. Methodology, numbers,
+over four minutes (~390 seeds/second) on an M4 MacBook Air. Methodology, numbers,
 and the campaign results:
 [benchmarks/README.md](https://github.com/dhruvl/simloop/blob/main/benchmarks/README.md).
 
