@@ -26,6 +26,23 @@ def _check_bytes(data: object) -> bytes:
     return bytes(data)
 
 
+def _check_limits(high: int | None, low: int | None) -> tuple[int, int]:
+    """Derive a (low, high) watermark pair the way the stdlib derives it.
+
+    The rules and the error text match
+    ``asyncio.transports._FlowControlMixin._set_write_buffer_limits``, so a
+    protocol that already knows what its own transport accepts learns nothing
+    new here. Shared with the network default so both are checked once.
+    """
+    if high is None:
+        high = 64 * 1024 if low is None else 4 * low
+    if low is None:
+        low = high // 4
+    if not high >= low >= 0:
+        raise ValueError(f"high ({high!r}) must be >= low ({low!r}) must be >= 0")
+    return (low, high)
+
+
 class _SimDatagramTransport(asyncio.DatagramTransport):
     def __init__(self, net: SimNetwork, local: _Addr, remote: _Addr | None) -> None:
         super().__init__()
@@ -168,9 +185,14 @@ class _SimStreamTransport(asyncio.Transport):
 
     Reliability comes from per-direction sequence numbers dispatched in
     order by the network, not from retransmission: stream packets are never
-    dropped, only delayed or held. Flow control is not simulated — writes
-    leave immediately, so the reported write-buffer size is always zero and
-    the peer can never pause this side.
+    dropped, only delayed or held.
+
+    The write buffer holds every byte written that the peer's protocol has
+    not received yet — in flight, held by a partition, waiting on an earlier
+    sequence number, or parked because the peer paused reading. Bytes are
+    charged in ``write`` and credited when the receiving end hands them up,
+    and crossing a watermark pauses or resumes the protocol synchronously.
+    None of it applies until ``net.set_flow_control()`` arms it.
     """
 
     def __init__(
@@ -189,7 +211,11 @@ class _SimStreamTransport(asyncio.Transport):
         self._read_paused = False
         self._backlog: list[bytes] = []
         self._eof_pending = False
-        self._limits = (16 * 1024, 64 * 1024)  # (low, high): recorded, inert
+        self._write_buffer = 0
+        self._protocol_paused = False
+        # None means this transport never set its own, so the network default
+        # applies — including a change to it made after this transport existed.
+        self._limits: tuple[int, int] | None = None
         self._extra_socket: _SimSocket | None = None
         self._peer_closed = False  # the peer's FIN or RST has arrived
 
@@ -224,6 +250,7 @@ class _SimStreamTransport(asyncio.Transport):
             raise RuntimeError("Cannot write to closing transport")
         if payload:
             self._send("data", payload)
+            self._charge(len(payload))
 
     def writelines(self, list_of_data: Any) -> None:
         for data in list_of_data:
@@ -259,12 +286,106 @@ class _SimStreamTransport(asyncio.Transport):
             return
         self._closed = True
         self._closing = True
+        # Nothing can be owed on a connection that no longer exists. The
+        # protocol is not resumed here: connection_lost is what wakes a writer
+        # waiting in drain(), and resume_writing on a torn-down protocol would
+        # be a second wakeup the stdlib never sends.
+        self._write_buffer = 0
+        self._protocol_paused = False
         self._net._drop_stream(self._conn, self._local[0], self._local[1])
         if self._extra_socket is not None:
             self._extra_socket._dispose()
         protocol, self._protocol = self._protocol, None
         if protocol is not None:
             protocol.connection_lost(exc)
+
+    # ------------------------------------------------------------------
+    # Write flow control (bytes the peer's protocol has not received yet)
+    # ------------------------------------------------------------------
+
+    def _effective_limits(self) -> tuple[int, int]:
+        if self._limits is not None:
+            return self._limits
+        return self._net._flow_defaults
+
+    def _charge(self, count: int) -> None:
+        if not self._net._flow_control:
+            return
+        self._write_buffer += count
+        self._maybe_pause_protocol()
+
+    def _credit(self, count: int) -> None:
+        if not self._net._flow_control or self._closed:
+            return
+        # Arming mid-run cannot un-send what is already on the wire, so a
+        # credit for bytes that were never charged stops at zero.
+        self._write_buffer = max(0, self._write_buffer - count)
+        self._maybe_resume_protocol()
+
+    def _consumed(self, count: int) -> None:
+        """Release the sender of bytes this end has just handed to its protocol."""
+        if not self._net._flow_control:
+            return
+        # The remote endpoint's own key: on a self-connection the two ends
+        # share a host, and the port is what addresses the one that wrote.
+        peer = self._net._streams.get(
+            (self._conn, self._remote[0], self._remote[1])
+        )
+        if peer is not None:
+            peer._credit(count)
+
+    def _maybe_pause_protocol(self) -> None:
+        _low, high = self._effective_limits()
+        if self._write_buffer <= high or self._protocol_paused:
+            return
+        if self._protocol is None:
+            return
+        self._protocol_paused = True
+        try:
+            self._protocol.pause_writing()
+        except (SystemExit, KeyboardInterrupt):
+            raise
+        except BaseException as exc:
+            self._report_failure("protocol.pause_writing() failed", exc)
+
+    def _maybe_resume_protocol(self) -> None:
+        low, _high = self._effective_limits()
+        if not self._protocol_paused or self._write_buffer > low:
+            return
+        self._protocol_paused = False
+        if self._protocol is None:
+            return
+        try:
+            self._protocol.resume_writing()
+        except (SystemExit, KeyboardInterrupt):
+            raise
+        except BaseException as exc:
+            self._report_failure("protocol.resume_writing() failed", exc)
+
+    def _release_flow_control(self) -> None:
+        """Let go of a paused writer because the switch just went off."""
+        self._write_buffer = 0
+        if not self._protocol_paused:
+            return
+        self._protocol_paused = False
+        if self._protocol is None:
+            return
+        try:
+            self._protocol.resume_writing()
+        except (SystemExit, KeyboardInterrupt):
+            raise
+        except BaseException as exc:
+            self._report_failure("protocol.resume_writing() failed", exc)
+
+    def _report_failure(self, message: str, exc: BaseException) -> None:
+        self._net._loop.call_exception_handler(
+            {
+                "message": message,
+                "exception": exc,
+                "transport": self,
+                "protocol": self._protocol,
+            }
+        )
 
     # ------------------------------------------------------------------
     # Inbound (called by the network, already in seq order)
@@ -277,6 +398,9 @@ class _SimStreamTransport(asyncio.Transport):
             self._backlog.append(data)
             return
         self._protocol.data_received(data)
+        # Credited after the call, not before: the sender is released only once
+        # the receiving protocol has finished with the bytes.
+        self._consumed(len(data))
 
     def _eof_arrived(self) -> None:
         self._peer_closed = True
@@ -315,7 +439,11 @@ class _SimStreamTransport(asyncio.Transport):
             return
         self._read_paused = False
         while self._backlog and not self._read_paused and not self._closed:
-            self._protocol.data_received(self._backlog.pop(0))
+            chunk = self._backlog.pop(0)
+            self._protocol.data_received(chunk)
+            # Per chunk, so a protocol that pauses again mid-drain leaves the
+            # rest of the backlog charged to the sender.
+            self._consumed(len(chunk))
         if self._eof_pending and not self._read_paused and not self._closed:
             self._eof_pending = False
             self._eof_arrived()
@@ -355,18 +483,15 @@ class _SimStreamTransport(asyncio.Transport):
     def set_write_buffer_limits(
         self, high: int | None = None, low: int | None = None
     ) -> None:
-        if high is None:
-            high = 64 * 1024 if low is None else 4 * low
-        if low is None:
-            low = high // 4
-        if not high >= low >= 0:
-            raise ValueError(
-                f"high ({high!r}) must be >= low ({low!r}) must be >= 0"
-            )
-        self._limits = (low, high)
+        self._limits = _check_limits(high, low)
+        # Only the pause side, matching the stdlib: lowering the marks under a
+        # full buffer pauses at once, raising them waits for a read to resume.
+        self._maybe_pause_protocol()
 
     def get_write_buffer_limits(self) -> tuple[int, int]:
-        return self._limits
+        return self._effective_limits()
 
     def get_write_buffer_size(self) -> int:
-        return 0
+        # With flow control off nothing is charged and writes leave
+        # immediately, so nothing is buffered to report.
+        return self._write_buffer if self._net._flow_control else 0
