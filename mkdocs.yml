@@ -1,0 +1,67 @@
+site_name: simloop
+site_description: >-
+  Deterministic simulation testing for Python asyncio: seeded scheduling,
+  virtual time, replayable failures.
+site_url: https://dhruvl.github.io/simloop/
+repo_url: https://github.com/dhruvl/simloop
+repo_name: dhruvl/simloop
+edit_uri: ""
+
+# Every page that ships is a flat file directly under docs/; anything in a
+# subdirectory is local working material that git already ignores and the
+# site must too. Excluding directories wholesale is the same kind of promise
+# the sdist allowlist makes: an accidental `mkdocs gh-deploy` from a working
+# checkout cannot publish anything the repository does not carry.
+exclude_docs: |
+  */
+
+# CHANGELOG.md lives at the repository root, where a reader who never opens
+# the site still finds it. The hook hands that one file to the build as a
+# page, so there is no second copy to drift.
+hooks:
+  - scripts/mkdocs_hooks.py
+
+strict: true
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: black
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - content.code.copy
+    - navigation.instant
+    - navigation.top
+    - navigation.tracking
+    - toc.follow
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+
+nav:
+  - Home: index.md
+  - Quickstart: quickstart.md
+  - Cookbook: cookbook.md
+  - Supported API: supported-api.md
+  - Compatibility: compatibility.md
+  - Design: design.md
+  - Changelog: changelog.md

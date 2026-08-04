@@ -36,6 +36,9 @@ probes = [
     "websockets==17.0.1",
     "trustme==1.2.1",
 ]
+# Builds the documentation site (mkdocs.yml). Dev-only, like the probes:
+# never a runtime dependency, never installed by a plain `uv sync`.
+docs = ["mkdocs-material>=9.5"]
 
 [project.entry-points.pytest11]
 simloop = "simloop._pytest_plugin"
