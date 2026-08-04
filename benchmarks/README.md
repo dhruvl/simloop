@@ -140,3 +140,48 @@ the cluster settles, so the violation surfaces as `convergence` rather than
 `exactly-once`. The 200-seed test budget never reaches those seeds; both
 flavors are the same missing safeguard, and both replay from their seed
 with an identical trace hash.
+
+## What the green number measures
+
+That throughput says as much about the laptop as about the code, which is
+worth stating next to it. The same sweep recorded 300.1 seeds/s on
+2026-08-01 and 263.1 on 2026-08-04, about 12% apart, with four merges in
+between: the inline executor, loopback streams, write-side flow control, and
+TLS. None of them is what paid.
+
+Wall clock cannot settle that question on a fanless laptop. Five interleaved
+2,500-seed runs of each of those merge commits spread 230–265 seeds/s
+*within* every commit, a swing as wide as the drift being chased. CPU time
+can: summed across the ten workers it does not care how busy the machine is,
+and by that measure a seed costs the same across the whole window.
+
+| tree | seeds / CPU-second | vs #24 |
+|---|---|---|
+| #24 disk-sync — where 300.1 was measured | 32.77 | — |
+| #25 inline executor | 32.82 | +0.2% |
+| #26 loopback streams | 32.74 | −0.1% |
+| #27 write-side flow control | 32.79 | +0.1% |
+| #28 TLS | 32.62 | −0.5% |
+| main (0.2.0) | 32.49 | −0.8% |
+
+Median of five interleaved runs each, 2,500 seeds, 10 jobs, with every
+tree's own spread under 1%. The single-process sweep agrees: 63.7 to 63.9
+seeds/CPU-second over the same four merges. Running the sweep itself back to
+back closes the question — today main covers 20,000 seeds at 262.8 seeds/s,
+reproducing the recorded 263.1, while the #24 tree that recorded 300.1
+manages 259.2 in the same sitting. The 300.1 was a quieter machine, not
+faster code.
+
+Two of those merges do touch the per-packet path, so their costing nothing
+is the part worth recording. Flow control charges a write and credits a
+delivery; with the switch off each is an attribute read and a return, about
+150 calls a seed and 0.1% of profiled time. Loopback streams widened the
+stream registry key from a 2-tuple to a 3-tuple, one more element to hash
+per dispatch. Neither is visible against where a seed's time actually goes:
+**38.6%** of it is the `gc.collect()` that `run_until_complete` needs in
+order to surface an orphaned task's failure, at 2.4 ms a call, twice per
+seed — once for the run and once for the teardown drain.
+
+So: re-measure back to back against whichever tree the number is being
+compared with, on a machine doing nothing else. Ratios taken in one sitting
+transfer; absolute numbers recorded three days apart do not.
