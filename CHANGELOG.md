@@ -2,6 +2,33 @@
 
 ## 0.2.0 (unreleased)
 
+- `drain()` can finally block. `loop.net.set_flow_control()` gives stream
+  transports a write buffer that holds every byte written but not yet
+  received by the peer's protocol — still in flight, held by a partition,
+  queued behind an earlier sequence number, or parked because the peer called
+  `pause_reading()`. A slow reader, a cut link and a dead peer therefore all
+  push back, and a writer paused against a crashed peer keeps waiting until
+  its own timeout fires, because a crashed host sends no reset and a real
+  sender would wait too. Crossing the high mark calls `pause_writing()` and
+  falling back to the low one calls `resume_writing()`, both synchronously,
+  which is what turns a backpressure deadlock or an unhandled pause into
+  something a seed can find. Off unless you ask for it, and the watermarks
+  once armed are the standard library's own `(low=16 KiB, high=64 KiB)`,
+  overridable network-wide or per transport with `set_write_buffer_limits`.
+  The switch is what makes the defaults safe: `set_write_buffer_limits` on
+  its own records numbers without enforcing them, because libraries call it
+  uninvited — anyio sets limits on every stream, websockets on every
+  connection — and arming on their call would change, or deadlock, workloads
+  nobody touched. On hashes: the feature adds no packets and no scheduling
+  events of its own, so a run that never arms it is byte-identical to the run
+  it was before, checked against digests pinned from before the feature
+  existed; an armed run that actually crosses a mark hashes anew, because the
+  writer it wakes is a real scheduling decision. One honest divergence from
+  TCP: the buffer drains when the peer's *application* receives the bytes,
+  with no read-ahead, so simulated backpressure is strictly tighter than the
+  real thing — deliberately, since that is what makes a slow consumer
+  visibly slow. With the switch off `get_write_buffer_size()` reports `0`,
+  which is the truth: nothing is charged and writes leave immediately.
 - Traces now say *where*, and that changes every hash. Each scheduling event
   carries the host it belongs to — the machine that asked for a callback on
   `schedule`, the machine that owns it on `run` and `cancel`, and nothing at

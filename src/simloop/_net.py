@@ -18,7 +18,11 @@ from typing import TYPE_CHECKING, Any
 
 import asyncio
 
-from simloop._transports import _SimDatagramTransport, _SimStreamTransport
+from simloop._transports import (
+    _check_limits,
+    _SimDatagramTransport,
+    _SimStreamTransport,
+)
 
 if TYPE_CHECKING:
     from simloop._loop import SimLoop
@@ -408,6 +412,8 @@ class SimNetwork:
         self._default_latency: tuple[float, float] = (0.0, 0.0)
         self._default_drop = 0.0
         self._default_duplicate = 0.0
+        self._flow_control = False
+        self._flow_defaults: tuple[int, int] = (16 * 1024, 64 * 1024)
         self._links: dict[tuple[str, str], _Link] = {}
         self._cuts: set[frozenset[str]] = set()
         self._held: list[_Packet] = []
@@ -597,6 +603,36 @@ class SimNetwork:
                 "torn=True needs buffered=True: an unbuffered write is already durable"
             )
         self.host(name).disk._configure(buffered=buffered, torn=torn)
+
+    def set_flow_control(
+        self, *, enabled: bool = True, high: int | None = None, low: int | None = None
+    ) -> None:
+        """Make stream writes push back when the peer is not keeping up.
+
+        Armed, a transport's write buffer counts every byte it has written
+        that the peer's protocol has not received — still on the wire, held
+        by a partition, or parked because the peer paused reading. Crossing
+        ``high`` calls ``pause_writing`` on the protocol, so ``drain()``
+        really waits; dropping back to ``low`` calls ``resume_writing``. Both
+        happen at once, without a scheduling step of their own. Watermarks
+        default to the standard library's 64 KiB and 16 KiB and can be set
+        here for the whole network or per transport with
+        ``set_write_buffer_limits``.
+
+        Off unless asked for, and a transport's own limits are recorded but
+        inert until then, because libraries set them uninvited: a run that
+        never calls this decides exactly what it decided without it.
+        Turning it off releases whatever is paused.
+
+        The buffer drains on the peer *application's* read, with no
+        read-ahead, so this pushes back sooner than a real socket does.
+        """
+        if high is not None or low is not None:
+            self._flow_defaults = _check_limits(high, low)
+        self._flow_control = enabled
+        if not enabled:
+            for transport in list(self._streams.values()):
+                transport._release_flow_control()
 
     def clock_offset(self, name: str) -> float:
         self._require_host(name)
