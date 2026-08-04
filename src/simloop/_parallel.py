@@ -19,6 +19,7 @@ no pytest, and the multiprocessing machinery is imported lazily so that
 from __future__ import annotations
 
 import functools
+import gc
 import importlib.util
 import inspect
 import pickle
@@ -203,6 +204,35 @@ class _Frontier:
             self.failure = failure
 
 
+_heap_frozen = False
+
+
+def _freeze_imports() -> None:
+    """Take the worker's imported heap out of every later cycle collection.
+
+    Each run ends with a ``gc.collect()`` — that is what turns a failed
+    fire-and-forget task's reference cycle into a reported failure — and a
+    full collection walks every tracked object, which in a warmed worker is
+    some twenty thousand modules, classes and functions that a run cannot
+    make garbage. Freezing them moves them to the permanent generation,
+    which collections never traverse, so the same collection costs a
+    fraction of what it did and still sees everything a run built: freezing
+    applies to objects that already exist, and a run's cycles are all
+    allocated after this.
+
+    Done on the first batch rather than at spawn, because the workload's own
+    module is imported when the batch that carries it is unpickled, and
+    freezing before that would leave it out. Once only: a later call would
+    make one batch's garbage permanent.
+    """
+    global _heap_frozen
+    if _heap_frozen:
+        return
+    _heap_frozen = True
+    gc.collect()
+    gc.freeze()
+
+
 def _run_batch(fn: Workload, start: int, seeds: Sequence[int]) -> Failure | None:
     """Run ``seeds`` in order and report the first that failed.
 
@@ -211,6 +241,7 @@ def _run_batch(fn: Workload, start: int, seeds: Sequence[int]) -> Failure | None
     away, because the parent re-runs the seed that matters anyway and
     shipping any of it back would mean pickling it.
     """
+    _freeze_imports()
     for offset, seed in enumerate(seeds):
         loop = SimLoop(seed)
         try:

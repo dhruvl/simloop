@@ -230,6 +230,36 @@ def test_one_seed_needs_no_worker_processes() -> None:
     assert report.seed == 4
 
 
+async def _boom() -> None:
+    raise RuntimeError("orphaned boom")
+
+
+async def _orphans_a_failure_at(bad_seed: int) -> None:
+    """Drop a failing task on ``bad_seed`` and otherwise finish cleanly.
+
+    Nobody awaits the task, so its exception reaches the loop only when the
+    cycle collector finalizes it — which is the one thing a worker's frozen
+    heap must not change.
+    """
+    loop = asyncio.get_running_loop()
+    assert isinstance(loop, simloop.SimLoop)
+    if loop.seed == bad_seed:
+        asyncio.create_task(_boom())
+    await asyncio.sleep(1.0)
+
+
+def test_a_worker_still_surfaces_an_orphaned_failure() -> None:
+    # Workers take their imported heap out of every cycle collection, which
+    # is only sound because a run's own cycles are built after the freeze.
+    # A dropped failing task is exactly such a cycle, so finding this seed is
+    # what says the freeze cost the guarantee nothing.
+    report = explore(functools.partial(_orphans_a_failure_at, 5), range(32), jobs=2)
+    assert report is not None
+    assert report.seed == 5
+    assert isinstance(report.exception, RuntimeError)
+    assert "orphaned boom" in str(report.exception)
+
+
 async def _fails_only_in_workers() -> None:
     loop = asyncio.get_running_loop()
     assert isinstance(loop, simloop.SimLoop)
