@@ -11,9 +11,12 @@ edit_uri: ""
 # subdirectory is local working material that git already ignores and the
 # site must too. Excluding directories wholesale is the same kind of promise
 # the sdist allowlist makes: an accidental `mkdocs gh-deploy` from a working
-# checkout cannot publish anything the repository does not carry.
+# checkout cannot publish anything the repository does not carry. The theme
+# serves its stylesheets and scripts through this same filter, so its assets
+# are let back through by name — without that the site deploys as bare HTML.
 exclude_docs: |
   */
+  !assets/
 
 # CHANGELOG.md lives at the repository root, where a reader who never opens
 # the site still finds it. The hook hands that one file to the build as a
