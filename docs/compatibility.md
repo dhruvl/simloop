@@ -140,6 +140,9 @@ rather than a row — no probe on this page requests `https://`.
   simloop fences `start_tls` and `create_connection(ssl=...)`, but a stack
   that runs its handshake in memory reaches neither — it reaches a simulated
   network with nothing on it that speaks TLS unless the test puts it there.
-- Anything that reaches outside the loop by design — threads, executors,
-  subprocesses, signals, real DNS. Those are fences, listed in
+- Anything that reaches outside the loop by design — threads, subprocesses,
+  signals, real DNS. Those are fences, listed in
   [docs/supported-api.md](supported-api.md), not compatibility questions.
+  Executors left this list: `run_in_executor` now runs the function inline,
+  which the same page describes; `anyio.to_thread` stays out because its
+  worker threads are real ones the loop never sees.
