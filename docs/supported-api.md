@@ -151,7 +151,7 @@ did reach the machine, and only then found nothing to take it. `crash` and
 Hashes are comparable within a version, not across versions: the host field
 and the `deliver` events are new in 0.2.0, so every workload's trace hashes
 differ from the ones 0.1.0 recorded — see the
-[changelog](../CHANGELOG.md). What a hash promises is unchanged: same seed,
+[changelog](changelog.md). What a hash promises is unchanged: same seed,
 same code, same interpreter, same hash.
 
 TLS costs that promise one clause, and only for a workload that uses it. TLS

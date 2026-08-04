@@ -4,6 +4,8 @@ Deterministic simulation testing for Python asyncio: seeded scheduling,
 virtual time, and a simulated network with fault injection. Any failure
 simloop finds replays exactly from a seed.
 
+Documentation: [dhruvl.github.io/simloop](https://dhruvl.github.io/simloop/).
+
 Rust has [madsim](https://github.com/madsim-rs/madsim) and
 [turmoil](https://github.com/tokio-rs/turmoil); FoundationDB and
 TigerBeetle made the technique famous. simloop brings it to asyncio:

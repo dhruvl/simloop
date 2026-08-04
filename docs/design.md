@@ -376,7 +376,9 @@ suite's cross-process runs would have caught drift there.
 
 ## Performance
 
-Numbers and methodology in [benchmarks/](../benchmarks/README.md); the shape
+Numbers and methodology in
+[benchmarks/](https://github.com/dhruvl/simloop/blob/main/benchmarks/README.md);
+the shape
 matters more than the digits. A simulated loop never blocks in a selector,
 so SimLoop schedules a task step in ~4.4 µs where the stock macOS loop
 spends ~16 µs — about half of that inside the per-iteration `kqueue` call —
@@ -398,7 +400,7 @@ worker crashes, and poison jobs with four invariants checked after every
 run; its ablation matrix shows that removing any load-bearing safeguard
 yields a seed-replayable violation, while each redundant defense also holds
 alone. The full bug table is in
-[examples/jobqueue/README.md](../examples/jobqueue/README.md).
+[examples/jobqueue/README.md](https://github.com/dhruvl/simloop/blob/main/examples/jobqueue/README.md).
 
 The demo also disciplined the harness: carrying a real distributed system
 is what shaped the deadlock diagnostics, the pending-task reports, and the
