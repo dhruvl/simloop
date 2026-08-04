@@ -211,6 +211,11 @@ class _SimStreamTransport(asyncio.Transport):
             conn=self._conn,
             seq=seq,
             payload=payload,
+            # The ports address the peer's end of this connection: on a
+            # self-connection the two ends share a host and only the port
+            # tells the registry which one a packet is for.
+            src_port=self._local[1],
+            dst_port=self._remote[1],
         )
 
     def write(self, data: Any) -> None:
@@ -254,7 +259,7 @@ class _SimStreamTransport(asyncio.Transport):
             return
         self._closed = True
         self._closing = True
-        self._net._drop_stream(self._conn, self._local[0])
+        self._net._drop_stream(self._conn, self._local[0], self._local[1])
         if self._extra_socket is not None:
             self._extra_socket._dispose()
         protocol, self._protocol = self._protocol, None

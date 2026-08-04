@@ -113,6 +113,13 @@
   threads are real ones spawned through no loop API — a real thread racing
   a virtual clock ends in the cross-thread fence, a hang, or the caller's
   own timeout, whichever the race picks.
+- A host can connect to its own listener. The stream registry used to key
+  each connection end by host alone, so the two ends of a self-connection
+  collapsed onto one entry and the run deadlocked; the key now carries the
+  end's own port, the connect handshake answers to the connector's port
+  rather than the listener's, and a loopback connect to a closed port is
+  refused instead of hanging. Packets between distinct hosts are keyed,
+  ordered and traced exactly as before, so existing hashes do not move.
 - `server.sockets` on a simulated server answers with an empty tuple
   instead of not existing, which is all aiohttp's `web.TCPSite` and
   websockets' `serve()` need to start; both now run their documented

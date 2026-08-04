@@ -127,6 +127,57 @@ def test_connect_to_nothing_is_refused_after_a_round_trip() -> None:
     assert elapsed == pytest.approx(0.1)  # syn there + refusal back
 
 
+def test_a_host_can_connect_to_its_own_listener() -> None:
+    # Both ends of this connection live on one machine, so the stream
+    # registry must tell them apart by more than the host name — the
+    # client's ephemeral port against the listener's port is what does it.
+    loop = SimLoop(seed=0)
+    loop.net.host("solo")
+
+    async def handle(
+        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        await reader.readline()
+        writer.write(b"pong\n")
+        await writer.drain()
+        writer.close()
+
+    async def main() -> bytes:
+        server = await asyncio.start_server(handle, "0.0.0.0", 9000)
+        reader, writer = await asyncio.open_connection("solo", 9000)
+        writer.write(b"ping\n")
+        await writer.drain()
+        reply = await reader.readline()
+        writer.close()
+        await writer.wait_closed()
+        server.close()
+        return reply
+
+    try:
+        reply = loop.run_until_complete(loop.net.host("solo").create_task(main()))
+    finally:
+        loop.close()
+    assert reply == b"pong\n"
+    assert not loop.net._streams  # both ends existed, and both were torn down
+
+
+def test_a_loopback_connect_to_a_closed_port_is_refused() -> None:
+    # The refusal answers to the connector's own port. Addressed to the
+    # listener's port instead, it would land on the queue the syn already
+    # advanced and wait there forever — a deadlock instead of an error.
+    loop = SimLoop(seed=0)
+    loop.net.host("solo")
+
+    async def main() -> None:
+        with pytest.raises(ConnectionRefusedError):
+            await asyncio.open_connection("solo", 9999)
+
+    try:
+        loop.run_until_complete(loop.net.host("solo").create_task(main()))
+    finally:
+        loop.close()
+
+
 def test_bytes_arrive_complete_and_in_order_under_latency_chaos() -> None:
     loop = _network(seed=5)
     loop.net.set_defaults(latency=(0.001, 0.2))

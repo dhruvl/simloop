@@ -413,8 +413,11 @@ class SimNetwork:
         self._held: list[_Packet] = []
         self._datagrams: dict[tuple[str, int], _SimDatagramTransport] = {}
         self._listeners: dict[tuple[str, int], _Listener] = {}
-        self._streams: dict[tuple[int, str], _SimStreamTransport] = {}
-        self._inbound: dict[tuple[int, str], _InOrder] = {}
+        # Keyed by (conn, host, local port): a host can connect to its own
+        # listener, and without the port the two ends of that connection
+        # would collapse onto one key and overwrite each other.
+        self._streams: dict[tuple[int, str, int], _SimStreamTransport] = {}
+        self._inbound: dict[tuple[int, str, int], _InOrder] = {}
         self._pending: dict[int, _Connect] = {}
         self._next_conn = 0
         self._next_uid = 0
@@ -730,7 +733,7 @@ class SimNetwork:
             _current_host.reset(token)
 
     def _dispatch_stream(self, packet: _Packet) -> None:
-        key = (packet.conn, packet.dst)
+        key = (packet.conn, packet.dst, packet.dst_port)
         queue = self._inbound.get(key)
         if queue is None:
             queue = self._inbound[key] = _InOrder(self)
@@ -753,18 +756,18 @@ class SimNetwork:
                 client = _SimStreamTransport(
                     self, packet.conn, local=connect.local, remote=connect.remote
                 )
-                self._streams[(packet.conn, connect.local[0])] = client
+                self._streams[
+                    (packet.conn, connect.local[0], connect.local[1])
+                ] = client
                 protocol = connect.factory()
                 client._begin(protocol)
                 connect.fut.set_result((client, protocol))
             else:
                 connect.fut.set_exception(
-                    ConnectionRefusedError(
-                        f"connect to ({packet.src!r}, {packet.dst_port}) refused"
-                    )
+                    ConnectionRefusedError(f"connect to {connect.remote!r} refused")
                 )
             return
-        transport = self._streams.get((packet.conn, packet.dst))
+        transport = self._streams.get((packet.conn, packet.dst, packet.dst_port))
         if transport is None:
             return  # connection already torn down locally
         if packet.kind == "data":
@@ -783,7 +786,8 @@ class SimNetwork:
                 dst=packet.src,
                 conn=packet.conn,
                 seq=0,
-                dst_port=packet.dst_port,
+                src_port=packet.dst_port,
+                dst_port=packet.src_port,
             )
             return
         transport = _SimStreamTransport(
@@ -792,12 +796,21 @@ class SimNetwork:
             local=(packet.dst, packet.dst_port),
             remote=(packet.src, packet.src_port),
         )
-        self._streams[(packet.conn, packet.dst)] = transport
+        self._streams[(packet.conn, packet.dst, packet.dst_port)] = transport
         # The accept is seq 0 of the server-to-client direction, so any data
         # the protocol writes from connection_made (seq 1+) can never arrive
         # ahead of the accept, whatever the latency draws say.
+        # The accept (and the refusal above) answers to the connector's own
+        # port: the answer belongs to the client end's inbound direction, and
+        # on a self-connection that direction is told apart by port alone.
         self._send_stream(
-            kind="accept", src=packet.dst, dst=packet.src, conn=packet.conn, seq=0
+            kind="accept",
+            src=packet.dst,
+            dst=packet.src,
+            conn=packet.conn,
+            seq=0,
+            src_port=packet.dst_port,
+            dst_port=packet.src_port,
         )
         protocol = listener.factory()
         transport._begin(protocol)
@@ -828,8 +841,8 @@ class SimNetwork:
             )
         )
 
-    def _drop_stream(self, conn: int, host: str) -> None:
-        self._streams.pop((conn, host), None)
+    def _drop_stream(self, conn: int, host: str, port: int) -> None:
+        self._streams.pop((conn, host, port), None)
 
     async def _open_connection(
         self, protocol_factory: Any, host: Any, port: Any
@@ -842,6 +855,10 @@ class SimNetwork:
         conn = self._next_conn
         self._next_conn += 1
         src_port = self._ephemeral()
+        if host == src and src_port == port:
+            # A self-connection whose ends share a port would collapse onto
+            # one registry key; the next ephemeral number cannot collide.
+            src_port = self._ephemeral()
         fut: asyncio.Future[tuple[_SimStreamTransport, Any]] = (
             self._loop.create_future()
         )
