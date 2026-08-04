@@ -67,7 +67,14 @@ recorded trace hash moves, once, for every workload.
   its report rebuilt by re-running that seed in the parent, which also
   proves the replay held across processes. Workloads must be picklable to
   cross that boundary, so lambdas, closures and fixture-taking tests stay
-  sequential and say so.
+  sequential and say so. Each worker also freezes its imported heap before
+  its first batch, which roughly doubles seeds per second: every run ends
+  with a cycle collection — that is what turns a dropped failing task into a
+  reported failure — and a full collection otherwise re-walks twenty
+  thousand modules and classes a run cannot make garbage. Nothing a run
+  builds escapes the collection, because freezing only applies to what
+  already exists. Sequential runs are unchanged: the freeze happens in
+  simloop's own worker processes, never in yours.
 - Every scheduling decision flows through a policy seam: seeded draws by
   default, making the same draws the loop made when it owned the PRNG itself,
   with recorded choice lists that can replay a schedule independently of its
