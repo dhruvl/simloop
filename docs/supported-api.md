@@ -17,6 +17,8 @@ determinism. Fenced APIs raise `SimulationFenceError` (a subclass of
 | `run_until_complete` / `run_forever` / `stop` / `close` | Deadlock detection: raises `SimulationDeadlockError` when nothing can run |
 | Handle / timer cancellation | Honored and recorded in the scheduling trace |
 | Exception handling | Unhandled failures fail the run at `run_until_complete`; `set_exception_handler` supported |
+| `loop.run_in_executor` | The function runs inline at a scheduled step, not on a thread: the submission is an ordinary ready-queue entry — labelled `executor:<function>` in the trace — so the seeded draw orders it against everything else, and it costs no virtual time. Its result or exception lands on the returned future the way an executor worker would land it, and cancelling the future before the step runs means the function never runs. The `executor` argument is never used: there is no pool and nothing runs concurrently. `asyncio.to_thread` reaches the loop through this call, so it works; `anyio.to_thread` does not — it spawns real worker threads through no loop API, so no fence can catch the escape at the source: the worker's report back is a cross-thread `call_soon_threadsafe` that does fence, but whether a run sees that fence, hangs, or hits its own timeout first is a race between a real thread and a virtual clock. A function that blocks waiting for loop progress hangs the run rather than deadlocking detectably |
+| `loop.call_soon_threadsafe` | From the loop's own thread it is `call_soon` — which is all it ever was without a second thread involved. From any other thread it fences: a real thread's timing is outside the simulation |
 | `sim.random` / `sim.uuid4` / `sim.time` | Seed-derived streams inside a run; stdlib fallback outside |
 
 ## Works unchanged on top of the loop
@@ -78,14 +80,18 @@ reliable by construction; and addressing is IPv4-only and entirely synthetic
 ## Fenced
 
 Anything that reaches outside the simulation raises `SimulationFenceError`:
-executors and threads (`run_in_executor`, `call_soon_threadsafe`), signal
-handlers, subprocesses, file-descriptor callbacks (`add_reader` /
+real threads (`call_soon_threadsafe` from any thread but the loop's own),
+signal handlers, subprocesses, file-descriptor callbacks (`add_reader` /
 `add_writer`), loop-level TLS upgrades (`start_tls`,
 `create_connection(ssl=...)`), `sendfile`, pipes, and an eager task start
 (`create_task(eager_start=True)`), which would run a task's first step at
-creation time, before the seeded draw could order it against anything. TLS
-a library performs in memory reaches no loop API and so reaches no fence;
-what that means in practice is in
+creation time, before the seeded draw could order it against anything.
+Executor *submissions* are not in that list — `run_in_executor` runs the
+function inline, as the table above says — but the pool machinery around
+them still is: `set_default_executor` and `shutdown_default_executor`
+fence, because an executor that would never be used is refused rather than
+silently accepted. TLS a library performs in memory reaches no loop API
+and so reaches no fence; what that means in practice is in
 [docs/compatibility.md](compatibility.md).
 
 The socket calls are fenced with one exception. `sock_connect` on an

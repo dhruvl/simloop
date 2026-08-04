@@ -8,6 +8,7 @@ import heapq
 import random
 import socket
 import sys
+import threading
 import weakref
 from array import array
 from asyncio import events
@@ -45,8 +46,8 @@ class SimulationDeadlockError(RuntimeError):
 class SimulationFenceError(NotImplementedError):
     """The code under simulation touched an asyncio API simloop does not simulate.
 
-    Real I/O, executors, threads, signals and subprocesses reach outside the
-    simulation, so they fail loudly instead of silently breaking determinism.
+    Real I/O, threads, signals and subprocesses reach outside the simulation,
+    so they fail loudly instead of silently breaking determinism.
     """
 
 
@@ -72,6 +73,40 @@ def _label(callback: Callable[..., object]) -> str:
     if isinstance(name, str):
         return name
     return type(callback).__name__
+
+
+class _ExecutorJob:
+    """One ``run_in_executor`` submission, run inline at its scheduled step.
+
+    The instance carries the submitted function's qualified name as its own
+    ``__qualname__``, so the trace labels the step with the work rather than
+    the wrapper. Outcomes land on the future the way an executor worker would
+    land them: any ``BaseException`` is stored rather than raised, and a
+    future already cancelled when the step runs means the function never runs
+    at all — the inline equivalent of cancelling a pending work item.
+    """
+
+    def __init__(
+        self,
+        func: Callable[..., object],
+        args: tuple[Any, ...],
+        future: asyncio.Future[Any],
+    ) -> None:
+        self._func = func
+        self._args = args
+        self._future = future
+        self.__qualname__ = f"executor:{_label(func)}"
+
+    def __call__(self) -> None:
+        future = self._future
+        if future.cancelled():
+            return
+        try:
+            result = self._func(*self._args)
+        except BaseException as exc:
+            future.set_exception(exc)
+        else:
+            future.set_result(result)
 
 
 def _host_of(handle: asyncio.Handle) -> str:
@@ -168,7 +203,7 @@ class SimLoop(asyncio.AbstractEventLoop):
     Coroutine scheduling is inherited from the stdlib: ``asyncio.Task`` drives
     every step through ``call_soon``, so controlling ``call_soon`` dispatch is
     sufficient to control task interleaving. Anything this class does not
-    implement (networking, executors, signals, threads) raises
+    implement (threads, signals, subprocesses) raises
     ``NotImplementedError`` from the base class — unsupported code fails
     loudly instead of silently breaking determinism.
     """
@@ -223,6 +258,11 @@ class SimLoop(asyncio.AbstractEventLoop):
         # aiohttp reaches the network; the address is only visible in the
         # first call, so it is parked here until the upgrade claims it.
         self._sock_targets: dict[Any, tuple[Any, int]] = {}
+        # The one thread the simulation lives in: the creating thread until a
+        # run starts, the running thread from then on. call_soon_threadsafe
+        # compares against it — from this thread the call is call_soon, from
+        # any other it is a real concurrent thread and fences.
+        self._thread_id = threading.get_ident()
         self._net = SimNetwork(self)
 
     @classmethod
@@ -317,6 +357,55 @@ class SimLoop(asyncio.AbstractEventLoop):
         # how a wakeup crossing machines shows up in the trace.
         self._recorder.record("schedule", self._now, seq, label, _current_host.get())
         return handle
+
+    def call_soon_threadsafe(
+        self,
+        callback: Callable[[Unpack[_Ts]], object],
+        *args: Unpack[_Ts],
+        context: Context | None = None,
+    ) -> asyncio.Handle:
+        # From the simulation's own thread this is call_soon by definition —
+        # libraries call it defensively without ever leaving the loop, and
+        # nothing about the schedule changes. From any other thread the caller
+        # is a real concurrent thread, whose timing no seed controls, so it
+        # fences rather than smuggle a race into a deterministic run.
+        if threading.get_ident() != self._thread_id:
+            raise SimulationFenceError(
+                "simloop does not simulate 'call_soon_threadsafe' from "
+                "another thread: a real thread's timing is outside the "
+                "simulation; see docs/supported-api.md for the supported "
+                "asyncio subset"
+            )
+        return self.call_soon(callback, *args, context=context)
+
+    def run_in_executor(
+        self,
+        executor: Any,
+        func: Callable[[Unpack[_Ts]], Any],
+        *args: Unpack[_Ts],
+    ) -> asyncio.Future[Any]:
+        """Run ``func`` inline at a scheduled step instead of on a thread.
+
+        The submission becomes an ordinary ready-queue entry — labelled
+        ``executor:<func>`` in the trace — so the seeded draw orders it
+        against everything else and a run stays reproducible. The function
+        executes synchronously when that step runs, costing no virtual time,
+        and its result or exception lands on the returned future exactly as
+        an executor worker would land it. ``asyncio.to_thread`` reaches the
+        loop through this call, so it works under simulation too.
+
+        Two honest consequences of running inline: the ``executor`` argument
+        is never used — there is no pool, and nothing runs concurrently — and
+        a function that blocks waiting for loop progress (joining a thread
+        that needs a callback, waiting on a lock a coroutine holds) hangs the
+        process rather than deadlocking detectably.
+        """
+        self._check_closed()
+        if not callable(func):
+            raise TypeError(f"a callable object is expected, got {func!r}")
+        future: asyncio.Future[Any] = self.create_future()
+        self.call_soon(_ExecutorJob(func, args, future))
+        return future
 
     def call_later(
         self,
@@ -426,6 +515,7 @@ class SimLoop(asyncio.AbstractEventLoop):
         if self._running:
             raise RuntimeError("this event loop is already running")
         self._running = True
+        self._thread_id = threading.get_ident()
         events._set_running_loop(self)
         try:
             while not self._stopping and (self._ready or self._timers):
@@ -701,31 +791,15 @@ class SimLoop(asyncio.AbstractEventLoop):
     # Unsupported surface
     # ------------------------------------------------------------------
     #
-    # Networking, executors, subprocesses, signals, file descriptors and
-    # thread-safe scheduling all reach outside the simulation, so they cannot
-    # participate in a deterministic virtual-time run. Each one fails loudly
-    # with NotImplementedError instead of quietly breaking reproducibility.
+    # Subprocesses, signals, file descriptors and real threads all reach
+    # outside the simulation, so they cannot participate in a deterministic
+    # virtual-time run. Each one fails loudly with NotImplementedError
+    # instead of quietly breaking reproducibility.
     #
     # These are declared explicitly rather than inherited because the base
     # class marks them abstract: the signatures mirror the stubs (reproducing
     # the callback/args type variable where one is present) so a subclass
     # remains a well-typed AbstractEventLoop.
-
-    def call_soon_threadsafe(
-        self,
-        callback: Callable[[Unpack[_Ts]], object],
-        *args: Unpack[_Ts],
-        context: Context | None = None,
-    ) -> asyncio.Handle:
-        _fence("call_soon_threadsafe")
-
-    def run_in_executor(
-        self,
-        executor: Any,
-        func: Callable[[Unpack[_Ts]], Any],
-        *args: Unpack[_Ts],
-    ) -> Any:
-        _fence("run_in_executor")
 
     def add_reader(
         self,

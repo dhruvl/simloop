@@ -99,6 +99,20 @@
   package, seeds are deliberately not a strategy (a seed has no size to shrink
   toward, and two shrinkers aimed at one failure fight), and Hypothesis is a
   dev dependency of this repository rather than something simloop imports.
+- Executor submissions run inline instead of fencing: `loop.run_in_executor`
+  executes the function at an ordinary scheduled step — ordered by the
+  seeded draw, labelled `executor:<function>` in the trace, costing no
+  virtual time — and its result or exception lands on the returned future
+  the way a worker would land it, so `asyncio.to_thread` works under
+  simulation. The executor argument is never used (there is no pool and
+  nothing runs concurrently), and `set_default_executor` still fences: a
+  pool that would never run anything is refused rather than accepted.
+  `call_soon_threadsafe` from the loop's own thread is now `call_soon`,
+  which is all it ever was without a second thread; from any other thread
+  it still fences. None of this reaches `anyio.to_thread`, whose worker
+  threads are real ones spawned through no loop API — a real thread racing
+  a virtual clock ends in the cross-thread fence, a hang, or the caller's
+  own timeout, whichever the race picks.
 - `server.sockets` on a simulated server answers with an empty tuple
   instead of not existing, which is all aiohttp's `web.TCPSite` and
   websockets' `serve()` need to start; both now run their documented

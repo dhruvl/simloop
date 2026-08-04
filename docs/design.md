@@ -134,20 +134,29 @@ production.
 
 ## Fail loudly: the fence policy
 
-Anything that would reach outside the simulation — executors and threads,
+Anything that would reach outside the simulation — real threads,
 signals, subprocesses, raw sockets, `add_reader`/`add_writer`,
 TLS, pipes, `sendfile` — raises `SimulationFenceError` naming the exact call,
 and optional stdlib kwargs that would smuggle those in (`ssl=`, `sock=`, …)
 are rejected the same way.
 
-The tempting alternative was best-effort passthrough: let `run_in_executor`
-actually run things, keep most libraries importable, appear more compatible.
+The tempting alternative was best-effort passthrough: hand `run_in_executor`
+a real thread pool, keep most libraries importable, appear more compatible.
 That is the worst possible failure mode for this tool — a harness that
 *claims* determinism while real threads race underneath produces
 unreproducible "reproducible" failures, and every hour a user spends on a
 replay that doesn't replay is trust that never comes back. A loud fence
 converts silent wrongness into a documented boundary
 ([supported-api.md](supported-api.md)) plus an honest error message.
+
+`run_in_executor` is the one place the line moved without crossing it: the
+submitted function runs inline at a seeded scheduling step — no pool, no
+thread, no race — so `asyncio.to_thread` works and the schedule stays the
+seed's. What makes that safe is what it refuses to do: a caller's executor
+object is never used, and a genuine second thread calling in
+(`call_soon_threadsafe` from anywhere but the loop's thread) still fences,
+because that thread's timing is the nondeterminism the fence exists to
+keep out.
 
 The same posture applies to errors inside the simulation: a run must not
 look green while something failed. Unhandled exceptions from fire-and-forget

@@ -1,6 +1,7 @@
 import asyncio
 import contextvars
 import gc
+import threading
 import time
 from typing import Any, cast
 
@@ -168,15 +169,151 @@ def test_main_task_exception_wins_over_background_failure() -> None:
 def test_unsupported_apis_are_fenced() -> None:
     loop = SimLoop(seed=0)
     try:
-        with pytest.raises(SimulationFenceError, match="run_in_executor"):
-            loop.run_in_executor(None, print)
+        with pytest.raises(SimulationFenceError, match="add_reader"):
+            loop.add_reader(0, print)
         with pytest.raises(SimulationFenceError, match="supported-api"):
-            loop.call_soon_threadsafe(print)
+            loop.subprocess_shell(None, "true")
         # Callers written against the stdlib contract keep working.
         with pytest.raises(NotImplementedError):
             loop.add_signal_handler(2, print)
     finally:
         loop.close()
+
+
+def test_run_in_executor_runs_the_function_inline() -> None:
+    # The executor object is never used: there is no pool and nothing runs
+    # concurrently, so passing one that would fail on first touch proves it.
+    class ExplodingExecutor:
+        def submit(self, *args: object) -> None:
+            raise AssertionError("the executor object must never be used")
+
+    async def main(loop: SimLoop) -> tuple[str, float]:
+        upper = await loop.run_in_executor(ExplodingExecutor(), str.upper, "sim")
+        return upper, loop.time()
+
+    loop = SimLoop(seed=0)
+    try:
+        # The function runs at a scheduled step and costs no virtual time.
+        assert loop.run_until_complete(main(loop)) == ("SIM", 0.0)
+    finally:
+        loop.close()
+
+
+def test_asyncio_to_thread_reaches_the_inline_executor() -> None:
+    async def main() -> str:
+        return await asyncio.to_thread("-".join, ("a", "b"))
+
+    loop = SimLoop(seed=0)
+    try:
+        assert loop.run_until_complete(main()) == "a-b"
+    finally:
+        loop.close()
+
+
+def test_run_in_executor_delivers_the_exception() -> None:
+    def blow_up() -> None:
+        raise OSError("disk on fire")
+
+    async def main(loop: SimLoop) -> None:
+        with pytest.raises(OSError, match="disk on fire"):
+            await loop.run_in_executor(None, blow_up)
+
+    loop = SimLoop(seed=0)
+    try:
+        loop.run_until_complete(main(loop))
+    finally:
+        loop.close()
+
+
+def test_run_in_executor_rejects_a_non_callable() -> None:
+    loop = SimLoop(seed=0)
+    try:
+        with pytest.raises(TypeError, match="callable"):
+            loop.run_in_executor(None, cast(Any, "not callable"))
+    finally:
+        loop.close()
+
+
+def test_a_cancelled_submission_never_runs() -> None:
+    ran: list[str] = []
+
+    async def main(loop: SimLoop) -> None:
+        future = loop.run_in_executor(None, ran.append, "ran")
+        future.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await future
+        # The clock only advances once the ready queue is empty, so sleeping
+        # guarantees the submission's step has come and gone without running.
+        await asyncio.sleep(1.0)
+        assert ran == []
+
+    loop = SimLoop(seed=0)
+    try:
+        loop.run_until_complete(main(loop))
+    finally:
+        loop.close()
+
+
+def test_executor_steps_are_traced_and_deterministic() -> None:
+    def work() -> int:
+        return 7
+
+    async def main(loop: SimLoop) -> int:
+        result: int = await loop.run_in_executor(None, work)
+        return result
+
+    hashes: list[str] = []
+    for _ in range(2):
+        loop = SimLoop(seed=3)
+        try:
+            assert loop.run_until_complete(main(loop)) == 7
+        finally:
+            loop.close()
+        # The submission is an ordinary scheduling step, labelled with the
+        # submitted function rather than the wrapper that carried it.
+        labels = [event.label for event in loop.trace if event.kind == "run"]
+        assert any(
+            label.startswith("executor:") and label.endswith("work")
+            for label in labels
+        )
+        hashes.append(loop.trace_hash())
+    assert hashes[0] == hashes[1]
+
+
+def test_call_soon_threadsafe_on_the_loop_thread_is_call_soon() -> None:
+    fired: list[str] = []
+
+    async def main(loop: SimLoop) -> None:
+        loop.call_soon_threadsafe(fired.append, "fired")
+        await asyncio.sleep(1.0)
+
+    loop = SimLoop(seed=0)
+    try:
+        loop.run_until_complete(main(loop))
+    finally:
+        loop.close()
+    assert fired == ["fired"]
+
+
+def test_call_soon_threadsafe_from_another_thread_is_fenced() -> None:
+    caught: list[BaseException] = []
+    loop = SimLoop(seed=0)
+
+    def from_elsewhere() -> None:
+        try:
+            loop.call_soon_threadsafe(print)
+        except BaseException as exc:
+            caught.append(exc)
+
+    thread = threading.Thread(target=from_elsewhere)
+    try:
+        thread.start()
+        thread.join()
+    finally:
+        loop.close()
+    (exc,) = caught
+    assert isinstance(exc, SimulationFenceError)
+    assert "another thread" in str(exc)
 
 
 def test_an_eager_task_start_is_fenced() -> None:

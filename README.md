@@ -282,9 +282,14 @@ and the campaign results:
 ## Honest limits
 
 Code that goes through the event-loop API is supported; code that
-bypasses it is fenced: threads and executors, raw socket reads and
-writes, subprocesses, signals, and loop-level TLS upgrades raise
+bypasses it is fenced: threads, raw socket reads and writes,
+subprocesses, signals, and loop-level TLS upgrades raise
 `SimulationFenceError` rather than silently breaking determinism.
+Executor submissions stay inside the line: `run_in_executor` runs the
+function inline at a seeded scheduling step — no pool, no thread — so
+`asyncio.to_thread` works, and `call_soon_threadsafe` is `call_soon`
+when the caller is the loop's own thread, while a real second thread
+still fences.
 `sock_connect` on an `AF_INET` stream socket is the exception — it is
 simulated, so a client that connects a socket and hands it to
 `create_connection` runs, while the datagram and raw variants still fence.
