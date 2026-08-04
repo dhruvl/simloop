@@ -222,6 +222,28 @@ Decisions inside that model, each doing real work:
   application can actually defend against — write, sync, and only then act
   on it. Skipping that sync is a bug the simulation can now find, which is
   the whole reason the model exists.
+- **A write buffer counts what the peer has not read.** A stream transport
+  owes every byte it wrote that the peer's protocol has not received — on the
+  wire, held by a partition, or parked behind the peer's `pause_reading()`.
+  That definition is the only one under which a slow reader, a cut link and a
+  dead peer all push back, and it needs no wire traffic: the simulation is one
+  process, so the receiving transport can credit the sending one directly. The
+  alternative — a real receive window with credit packets — was rejected on
+  price: every credit would be another packet, another uid, another latency
+  draw, moving the trace hash of every stream workload in the repository and
+  invalidating recorded seeds users already hold, all to buy fidelity a
+  single-process simulation does not need. Pause and resume fire
+  synchronously, from the write and from the peer's read, as the stdlib's own
+  transports do, so the feature adds no scheduling event of its own; the only
+  new event is the woken writer's, which is a real scheduling decision. It is
+  off unless asked for, for the same reason the disk is: a run that never
+  calls `set_flow_control` has to decide exactly what it decided before, and
+  libraries set write-buffer limits uninvited, so arming on their call would
+  change — or deadlock — workloads nobody touched. The honest divergence is
+  that the buffer drains on the peer *application's* read with no read-ahead,
+  making simulated backpressure strictly tighter than real backpressure. That
+  is deliberate: it is what makes a slow consumer visibly slow, and it is why
+  the stdlib's numbers ship inside an opt-in mode rather than by default.
 - **The accept is sequence 0.** The server builds its transport and sends
   `accept` before its protocol's `connection_made` can write; the client
   transport is built when the accept is *dispatched*, not when the connector
@@ -234,8 +256,7 @@ Decisions inside that model, each doing real work:
   `datagram_received` belongs to the receiving machine, and `crash` knows
   exactly which tasks to kill.
 
-What was cut, deliberately: write-side flow control (`drain()` never blocks
-— buffers are unbounded), retransmission and congestion modeling, IP
+What was cut, deliberately: retransmission and congestion modeling, IP
 addresses, TLS. Each would deepen the simulation without widening the class
 of bugs it can catch; the supported-subset contract beats chasing 100% of
 the asyncio surface.

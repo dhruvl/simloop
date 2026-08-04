@@ -296,7 +296,11 @@ simulated, so a client that connects a socket and hands it to
 Name resolution stays inside the simulation: `getaddrinfo` resolves sim
 host names to stable synthetic addresses and raises `socket.gaierror` for
 anything else — no real DNS, ever.
-Write-side flow control is not simulated.
+Write-side flow control is simulated on request: `net.set_flow_control()`
+makes `drain()` really wait while the peer has not read, so backpressure
+deadlocks and missing pause/resume handling become findable. It is off by
+default, so a run that does not ask for it decides exactly what it decided
+before.
 The full contract is in [docs/supported-api.md](https://github.com/dhruvl/simloop/blob/main/docs/supported-api.md).
 What that contract costs real libraries — what aiohttp, anyio, websockets and
 httpx actually do under simulation, measured rather than promised — is in

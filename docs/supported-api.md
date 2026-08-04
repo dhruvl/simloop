@@ -46,6 +46,7 @@ a host belong to an implicit `driver` host.
 | `host.disk` | Storage that survives the crash: a `MutableMapping` per host, where state a real process would fsync belongs. By default a write is durable the moment it is made. Values are stored as given, so mutating a stored object afterwards is the caller's own aliasing, exactly as with a cache in front of a real disk. `disk.sync()` exists on every disk and does nothing on one that does not buffer, so the code under test is written the same way either way |
 | `loop.net.set_disk` | Makes a host's disk lie about when a write lands. `buffered=True` queues writes and deletes in order and only makes them durable on `sync()`; reads on that host see the queue merged over what is durable, in a fixed order — durable keys where the durable state has them, then the keys the queue invented, in write order, with a queued delete hiding a key. A crash throws the queue away and the reboot finds what was synced; with `torn=True` a seeded prefix of the queue survives instead, which is the state a machine that lost power part-way through a batch comes back with. A prefix is the whole model: writes never land out of order, and no value is ever half-written. Tearing needs a buffer to tear (`torn=True` alone is a `ValueError`), and reconfiguring a disk flushes whatever it was holding. The prefix is drawn from a seed-derived stream of its own, so a torn run makes exactly the network draws it would have made untorn, and a run that never calls `set_disk` draws nothing and records nothing — storage is not a scheduling event and has no trace events at all |
 | `loop.net.set_clock` / `clock_offset` | Per-host clock skew, in seconds. The offset changes what that host's tasks *read*: `loop.time()` (and `sim.time()` with it) returns true time plus the offset, and a deadline handed to `call_at` is interpreted on the calling task's clock. Durations are immune — `asyncio.sleep`, `asyncio.timeout`, `wait_for` and `call_later` cost the same everywhere, which is exactly what a wrong wall clock does to a real machine. By default the driver and unconfigured hosts read true time; the driver can be given an offset too. Trace timestamps stay on the true clock, so skew never perturbs scheduling and traces from skewed runs stay comparable |
+| `loop.net.set_flow_control` / `transport.set_write_buffer_limits` | Makes writes push back when the peer is not keeping up. A stream transport's write buffer holds every byte it has written that the peer's protocol has not received yet — still in flight, held by a partition, waiting behind an earlier sequence number, or parked because the peer called `pause_reading()`. So a slow reader, a cut link and a dead peer all apply backpressure. Crossing `high` calls `pause_writing()` on the protocol and dropping back to `low` calls `resume_writing()`; both happen synchronously, from the write and from the peer's read, so `drain()` really waits and no scheduling event of its own is added. Marks default to the standard library's `(low=16 KiB, high=64 KiB)`, settable network-wide here and per transport with `set_write_buffer_limits(high, low)`, which derives and validates them exactly as the stdlib does (a `high` below `low` is a `ValueError`). **Off until `loop.net.set_flow_control()` says otherwise**: a transport's own `set_write_buffer_limits` records numbers without enforcing them until then, because libraries set them uninvited — anyio sets limits on every stream, websockets on every connection — and upgrading should not deadlock a workload nobody changed. With the switch off `get_write_buffer_size()` reports `0`, which is honest: nothing is charged and writes leave immediately. Honest divergence from TCP: the buffer drains when the peer's *application* receives the bytes, with no read-ahead, so simulated backpressure is strictly tighter than real backpressure — which is what makes a slow consumer visibly slow. A crashed peer sends no reset, so a writer paused against one stays paused until its own timeout fires, exactly as a real sender does. Datagram endpoints have no write buffer at all |
 | `transport.abort()` | Peer gets `connection_lost(ConnectionResetError)` |
 | `loop.getaddrinfo` | Resolves against the host table, never DNS: a registered host name, its synthetic address, or a loopback-shaped name (`None`, `""`, `localhost`, `127.0.0.1`, `0.0.0.0`) meaning the calling task's own host. Returns stdlib-shaped rows — `(AF_INET, SOCK_STREAM, IPPROTO_TCP, "", (address, port))` and the `SOCK_DGRAM` / `IPPROTO_UDP` row — filtered by `family`, `type` and `proto`. Ports are numeric (`int`, a digit string, or `None` for 0); resolver `flags` have nothing to vary |
 | `loop.getnameinfo` | Reverse lookup: a synthetic address maps back to its host name, and a host name (what `get_extra_info("peername")` reports) maps to itself. `NI_NUMERICHOST` returns the address instead; services are always numeric |
@@ -71,11 +72,10 @@ by construction — in `examples/jobqueue/` only the broker reads a clock,
 so skewing a worker changes nothing the cluster decides. Clock faults
 reach only code that compares timestamps taken on different machines.
 
-Limitations, stated honestly: write-side flow control is not simulated
-(`drain()` never blocks, write buffers are unbounded, the peer cannot pause
-your writes); there is no retransmission or congestion model — streams are
-reliable by construction; and addressing is IPv4-only and entirely synthetic
-— there are no routes, no netmasks, and no service-name database.
+Limitations, stated honestly: there is no retransmission or congestion model
+— streams are reliable by construction; and addressing is IPv4-only and
+entirely synthetic — there are no routes, no netmasks, and no service-name
+database.
 
 ## Fenced
 
@@ -121,7 +121,9 @@ host)`:
 A `schedule` event names the host that *asked* for the callback, while `run`
 and `cancel` name the host the callback belongs to. The difference is the
 point: a wakeup that crosses machines is a `schedule` on one host and a `run`
-on another. An empty host means the event belongs to the simulation rather
+on another. Flow control is that shape exactly: it adds no packets and no
+scheduling events of its own, and what does appear is the wakeup of a writer
+that was waiting in `drain()`, scheduled by the host whose read released it. An empty host means the event belongs to the simulation rather
 than to any machine — a clock advance, which is global; the network's own
 delivery step, which happens on the wire between two machines rather than on
 either of them; and every `net` event, whose label already says which
