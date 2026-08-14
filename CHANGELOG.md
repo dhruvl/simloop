@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 (unreleased)
+## 0.2.0 (2026-08-13)
 
 The theme of the release is explanation: a failing seed now diffs itself
 against the last passing one, shrinks its schedule to the steps that
