@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.2.2 (unreleased)
+
+Documentation and benchmarks only; no library code changed, and every trace
+hash is the one 0.2.1 records.
+
+- The overhead benchmark reports CPU time next to wall clock, and a uvloop
+  row when uvloop is installed. By CPU time SimLoop costs about what the
+  stock loop costs and more than uvloop; the 3.7× the README used to quote
+  was wall clock, most of it time the real loop spends waiting in `kqueue`.
+  The README now says so, and every benchmark row carries its spread.
+- The examples on the README and on the documentation front page run as
+  tests, sample output included, so neither page can drift from what the
+  code prints. Two of the sample outputs had lines dropped without a `...`;
+  they show the real output now.
+- The README and the example READMEs claim only what their tests show. The
+  Raft ablation list names the one safeguard the explorer did not find, and
+  the jobqueue list says its ablations are six hand-picked mutations.
+- The quickstart answers whether simloop can share a suite with
+  pytest-asyncio: it can, in strict and auto mode.
+- CONTRIBUTING.md and SECURITY.md are new. Vulnerabilities can be reported
+  privately through GitHub.
+
 ## 0.2.1 (2026-09-28)
 
 Packaging metadata only; no library code changed.
