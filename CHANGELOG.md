@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.1 (unreleased)
+## 0.2.1 (2026-09-28)
 
 Packaging metadata only; no library code changed.
 
