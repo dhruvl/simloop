@@ -1,8 +1,8 @@
 # Third-party libraries under simulation
 
 [docs/supported-api.md](supported-api.md) states which asyncio APIs simloop
-simulates. This page answers the next question — what happens when a real
-library runs on top of them — with evidence rather than intent: every row
+simulates. This page answers the next question, what happens when a real
+library runs on top of them, with evidence rather than intent: every row
 below is the output of a script anyone can re-run.
 
 Recorded **2026-08-04**, against simloop 0.2.0 on Python 3.12 with OpenSSL
@@ -12,8 +12,8 @@ describe it too.
 ## What a probe is
 
 A probe is a small script in `probes/` that drives one library's happy path
-under a `SimLoop` — between two simulated hosts where the library talks to a
-network — and reports a single verdict:
+under a `SimLoop` (between two simulated hosts where the library talks to a
+network) and reports a single verdict:
 
 - `works: <what was exercised>` — the probe ran to the end of its own script
   and described what it did.
@@ -38,8 +38,8 @@ uv run --group probes python probes/report.py
 and paste the output below. The probe libraries are pinned exactly in the
 `probes` dependency group in `pyproject.toml`, so the version column
 describes what actually ran; `uv run pytest` does not install them, and
-`probes/` is never packaged. The probes are deliberately not part of CI — a
-third-party release should not break simloop's build — which is why this page
+`probes/` is never packaged. The probes are deliberately not part of CI, because a
+third-party release should not break simloop's build, which is why this page
 carries a date instead.
 
 | Library | Version | Verdict | Notes |
@@ -67,7 +67,7 @@ under httpx, starlette and anything built on `anyio.to_thread`-free code.
 
 **aiohttp's server** answers requests over the simulated network, both
 through `loop.create_server` directly and through the documented
-`AppRunner` + `web.TCPSite` startup path — the one `web.run_app` uses.
+`AppRunner` + `web.TCPSite` startup path, the one `web.run_app` uses.
 The two rows exist because they once differed: `TCPSite` reads
 `server.sockets` during startup, which the simulated server did not answer
 until it learned to report an empty tuple (there are no sockets in a
@@ -75,14 +75,14 @@ simulation, and the stdlib documents the tuple as possibly empty).
 
 **websockets** completes a handshake, echoes a frame and closes cleanly
 over `ws://` between two sim hosts. Its `serve()` reads the same
-`server.sockets` attribute during startup — only to log where it is
-listening — so it was unblocked by the same empty tuple.
+`server.sockets` attribute during startup, only to log where it is
+listening, so it was unblocked by the same empty tuple.
 
 **redis** has no row for a client library: every async Redis client needs a
 live server to reach its first command, and a live server is exactly what a
 simulation does not have. What is testable without one is the pattern those
-clients are built on — a length-prefixed request/response protocol on one
-long-lived connection — so the probe speaks RESP by hand against a small
+clients are built on, a length-prefixed request/response protocol on one
+long-lived connection, so the probe speaks RESP by hand against a small
 server on a second sim host, and the row claims no more than that.
 
 **aiohttp's client** issues its GET and reads the body back. Its connector
@@ -151,7 +151,7 @@ run.
 - **The rest of TLS**: the three TLS rows drive a server certificate, one
   cipher suite and TLS 1.3. Client certificates, a peer restricted to TLS
   1.2, ALPN and h2 negotiation, and session resumption are not probed.
-- Anything that reaches outside the loop by design — threads, subprocesses,
+- Anything that reaches outside the loop by design: threads, subprocesses,
   signals, real DNS. Those are fences, listed in
   [docs/supported-api.md](supported-api.md), not compatibility questions.
   Executors left this list: `run_in_executor` now runs the function inline,

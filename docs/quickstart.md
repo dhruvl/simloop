@@ -18,7 +18,9 @@ to a config file.
 
 `@sim_test` turns an `async def` test into an ordinary synchronous test that
 pytest collects. There is no fixture, no `asyncio_mode`, and no other asyncio
-plugin involved — simloop brings its own loop.
+plugin involved, because simloop brings its own loop. That also means it can
+share a suite with pytest-asyncio: pytest-asyncio leaves a `@sim_test` alone in
+both strict and auto mode, and its own tests keep running on the real loop.
 
 Write `tests/test_ledger.py`:
 
@@ -133,11 +135,10 @@ simloop: 1 sim test, 1 seeds explored
 1 failed in 0.13s
 ```
 
-One seed, one run, the same failure. Not "usually the same failure": same
-scheduling decisions, same fault decisions, same trace, and the trace hash to
-prove it. That is what makes a `--simloop-replay=2` line worth pasting into a
-bug report, and it is the point of the whole exercise — a concurrency bug you
-can reproduce on demand is a concurrency bug you can debug.
+One seed, one run, the same failure, and not just usually: the replay makes
+the same scheduling and fault decisions and records a trace with the same
+hash. That is what makes a `--simloop-replay=2` line worth pasting into a bug
+report.
 
 ## Shrink the schedule to the race
 
@@ -158,9 +159,8 @@ E         step 36  test_the_audit_sees_every_deposit.<locals>.audit
 ```
 
 One step out of 137 had to go a particular way, and it is named: the audit.
-When the answer comes back `minimized: FIFO throughout` instead, that is also
-an answer — the interleaving never mattered, so look at the fault timings
-rather than the task order.
+When the answer comes back `minimized: FIFO throughout` instead, the
+interleaving never mattered, and the fault timings are the place to look.
 
 Shrinking is off by default and marked experimental. It costs extra runs of
 the workload, capped by `--simloop-shrink-budget` (default 500).
@@ -178,8 +178,8 @@ E       timeline: artifacts/simloop-timeline-seed2.html
 ```
 
 Every failing seed leaves `simloop-timeline-seed<N>.html`, named in its own
-report. The page is self-contained — inline CSS, script and SVG, nothing
-fetched — so it opens from a CI artifact store as readily as from disk. It
+report. The page is self-contained, with its CSS, script and SVG inline and
+nothing fetched, so it opens from a CI artifact store as readily as from disk. It
 draws one lane per simulated machine and one for the simulation itself,
 virtual time running left to right, a dot for every scheduling decision and an
 arrow for every packet that crossed.
@@ -191,13 +191,13 @@ arrow for every packet that crossed.
   `crash` and `restart`, per-host disks that survive a crash, and clocks that
   disagree. The [front page](index.md) has a networked example and the
   [supported API](supported-api.md) has the full contract.
-- Property-based testing composes with this without an integration package:
-  Hypothesis searches the data, simloop searches the schedule. The recipe, and
+- Property-based testing composes with this without an integration package,
+  Hypothesis choosing the workload and simloop the schedule. The recipe, and
   the reasons a seed must not be a strategy, are in the
   [cookbook](cookbook.md).
 - Before pointing simloop at a real library, read
-  [compatibility](compatibility.md) — what aiohttp, anyio, websockets and httpx
-  do under simulation is measured there, not promised.
+  [compatibility](compatibility.md), which records what aiohttp, anyio,
+  websockets and httpx do under simulation.
 - Code that bypasses the event loop raises `SimulationFenceError` rather than
   quietly breaking determinism. Which calls those are, and why the line falls
   where it does, is in [supported API](supported-api.md) and

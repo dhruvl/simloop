@@ -1,17 +1,18 @@
 # simloop
 
-Deterministic simulation testing for Python asyncio: seeded scheduling,
-virtual time, and a simulated network with fault injection. Any failure
-simloop finds replays exactly from a seed.
+[![CI](https://github.com/dhruvl/simloop/actions/workflows/ci.yml/badge.svg)](https://github.com/dhruvl/simloop/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/simloop)](https://pypi.org/project/simloop/)
+
+simloop is a Python event loop similar to the standard asyncio loop, but
+built specifically for deterministic simulation testing using techniques from
+FoundationDB and TigerBeetle.
+
+The simulator systematically injects latency, drops packets, and crashes hosts
+to surface bugs. When a test fails, you get a seed. Using that seed, the exact
+same race condition reproduces every single time. The
+[limits](https://github.com/dhruvl/simloop#limits) are listed below.
 
 Documentation: [dhruvl.github.io/simloop](https://dhruvl.github.io/simloop/).
-
-Rust has [madsim](https://github.com/madsim-rs/madsim) and
-[turmoil](https://github.com/tokio-rs/turmoil); FoundationDB and
-TigerBeetle made the technique famous. simloop brings it to asyncio:
-your real, unmodified networking code runs on a simulated loop where
-time is virtual, every scheduling decision is seeded, and the network
-loses, delays, duplicates, and partitions traffic on command.
 
 ## Install
 
@@ -22,10 +23,31 @@ pip install simloop
 Python 3.12+. No runtime dependencies. The pytest plugin ships in the
 same package and activates automatically.
 
+A sim test is an `async def` test under `@sim_test`. It runs on a simulated
+loop, so five minutes of sleeping costs nothing:
+
+```python
+import asyncio
+
+from simloop import sim_test
+
+
+@sim_test
+async def test_virtual_time_is_free():
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    await asyncio.sleep(300)
+    assert loop.time() - start == 300
+```
+
+It sits alongside the rest of a suite, pytest-asyncio tests included; the
+[quickstart](https://github.com/dhruvl/simloop/blob/main/docs/quickstart.md) goes from here to a replayed failure
+one command at a time.
+
 ## Find a bug, then replay it
 
-A counter service and two clients that each read the count and write back
-one more — the textbook lost update, over the wire:
+A counter service, and two clients that each read the count and write back
+one more. It is the textbook lost update, over the wire:
 
 ```python
 import asyncio
@@ -84,6 +106,8 @@ simloop: failed at seed 128 (128 seeds passed first)
 replay: pytest 'tests/test_counter.py::test_two_increments_both_count' --simloop-replay=128
 
 last 20 trace events:
+  [t=1.3501] net      seq=22  deliver counter>b
+  [t=1.3944] advance  seq=-1
   [t=1.3944] run      seq=58  SimNetwork._deliver
   [t=1.3944] net      seq=21  deliver counter>b
   [t=1.3944] schedule seq=63  b  Task.task_wakeup
@@ -103,34 +127,29 @@ pending tasks by host:
   counter  Task 'Task-1026'  awaiting serve  at tests/test_counter.py:24
 ```
 
-The report names the failing seed, prints the exact command that replays
-it — same scheduling decisions, same fault decisions, same trace — and
-diffs the failing run against the last passing seed, so the first thing
-the two runs did differently is one line of output. Trace lines name the
-machine whose work they were; the ones naming none are the simulation's own
-— the clock advancing, a packet crossing the wire. In CI, crank the search
-without touching code:
+The report names the failing seed and the command that replays it, then
+diffs the failing run against the last passing seed, so the first thing the
+two runs did differently is one line of output. Each trace line names the
+machine whose work it was. Lines that name none belong to the simulation
+itself, such as the clock advancing or a packet crossing the wire. In CI,
+raise the seed count without touching code:
 
 ```
 pytest --simloop-seeds=1000
 ```
 
-Seeds are not the only way to search. `--simloop-policy=pct` schedules by
-priority instead of drawing uniformly — Burckhardt et al.'s PCT (ASPLOS
-2010): every chain of work gets a random priority, the highest ready one
-always runs, and a few randomly placed demotions shuffle the leader. That
-buys a stated probability, on every single run, of hitting a bug that needs
-`--simloop-pct-depth` scheduling constraints met in order. It is a floor,
-not a speed-up: on shallow races uniform draws find the bug sooner, and the
-[contract page](https://github.com/dhruvl/simloop/blob/main/docs/supported-api.md)
-publishes the measurement that says so.
+Uniform draws are not the only search: `--simloop-policy=pct` switches to
+PCT scheduling (Burckhardt et al., ASPLOS 2010), which guarantees a lower bound
+on the chance of finding deeper ordering bugs. It is a floor, not a speed-up;
+the bound and the measurement are on the
+[contract page](https://github.com/dhruvl/simloop/blob/main/docs/supported-api.md#scheduling-policies).
 
 ## Shrink the schedule to the race
 
 Most steps of a failing schedule are noise. With `--simloop-shrink`, the
 explorer replays edited copies of the recorded schedule, walking it back
 toward plain FIFO order until only the decisions that reproduce the
-failure remain — so the racing steps come out named:
+failure remain. What is left names the racing steps:
 
 ```python
 @sim_test(seeds=50)
@@ -164,11 +183,10 @@ minimized: FIFO except step 36
 ```
 
 One step out of 137 had to go a specific way: the audit ran before the
-deposit it should have seen. When shrinking instead reports `minimized:
-FIFO throughout`, that is an answer too — the interleaving never mattered,
-so look at the fault timings, not the task order. Shrinking is off by
-default (it costs extra runs, capped by `--simloop-shrink-budget`, default
-500) and experimental.
+deposit it should have seen. If shrinking reports `minimized: FIFO
+throughout` instead, the interleaving never mattered and the fault timings
+are the place to look. Shrinking is experimental and off by default, since
+it costs extra runs, capped by `--simloop-shrink-budget` (default 500).
 
 ## Watch the run that failed
 
@@ -179,8 +197,8 @@ pytest --simloop-timeline=artifacts
 ```
 
 Every failing seed leaves `artifacts/simloop-timeline-seed<N>.html`, named in
-its failure report. The page is self-contained — inline CSS, inline script,
-inline SVG, nothing fetched — so it opens from a CI artifact store or an
+its failure report. The page is self-contained, with its CSS, script and
+SVG inline and nothing fetched, so it opens from a CI artifact store or an
 attachment as readily as from disk. It draws one lane per simulated machine
 and one for the simulation itself, virtual time running left to right, a dot
 for every scheduling decision on that machine, and an arrow for every packet
@@ -191,11 +209,11 @@ events are drawn, and the page says so when there were more.
 `simloop.timeline_html(events)` renders the same page from any trace you are
 holding.
 
-## Compose with Hypothesis
+## Using with Hypothesis
 
-Hypothesis searches the data; simloop searches the schedule. `@given` builds
-the workload, `explore()` runs that workload under a range of seeds, and the
-property is "no seed broke it":
+Hypothesis picks inputs and simloop picks interleavings, so the two stack.
+`@given` builds the workload, `explore()` runs it under a range of seeds, and
+the property is "no seed broke it":
 
 ```python
 @settings(deadline=None, derandomize=True, database=None)
@@ -207,22 +225,40 @@ def test_the_log_keeps_every_append(writers, payloads):
 
 A failure then arrives in two halves: Hypothesis reports the smallest workload
 that still breaks, simloop reports the seed that breaks it and the command
-that replays it. Seeds stay out of the strategies on purpose — a seed has no
-size to shrink toward, and two shrinkers aimed at one failure fight. The
-worked example, the settings CI needs and the honest limits are in
-[docs/cookbook.md](https://github.com/dhruvl/simloop/blob/main/docs/cookbook.md),
-and the composition is a test in this repository rather than a claim. It stays
-a recipe: simloop has no Hypothesis dependency and no integration package.
+that replays it. Seeds stay out of the strategies on purpose, because a seed
+has no size to shrink toward and two shrinkers aimed at one failure fight.
+The worked example, the settings CI needs and the limits are in
+[docs/cookbook.md](https://github.com/dhruvl/simloop/blob/main/docs/cookbook.md), and the same composition runs as a
+test in this repository. simloop has no Hypothesis dependency and no
+integration package.
 
-## What the simulation gives you
+## How it compares
 
-- **Seeded scheduling** — the ready queue's execution order comes from a
-  per-run PRNG; a seed pins the entire interleaving.
-- **Virtual time** — `asyncio.sleep(300)` costs nothing; timeouts fire
-  in simulated seconds.
-- **A simulated network** — `open_connection` / `start_server` /
-  datagram endpoints run over an in-memory packet core with per-link
-  latency, drop, and duplication, plus partitions and host crashes:
+pytest-asyncio is what most asyncio suites already run on, and simloop does
+not replace it. It runs tests on the real event loop, so real sockets,
+threads and subprocesses all work, which makes it the right tool for most of
+a suite. The two coexist in one run: a `@sim_test` is an ordinary
+synchronous test as far as pytest is concerned, so pytest-asyncio leaves it
+alone in both strict and auto mode. Reach for simloop on the tests where the
+interleaving or the network is the thing being tested.
+
+trio's autojump clock gives trio code virtual time and ships with trio itself.
+How trio approached deterministic scheduling, and what simloop took from it,
+is in [docs/design.md](https://github.com/dhruvl/simloop/blob/main/docs/design.md#the-gap).
+
+Antithesis runs a whole deployment, in any language, under a deterministic
+hypervisor, so it sees code that never touches an event loop. simloop sees
+one Python process, and only what passes through asyncio.
+
+## Features
+
+Scheduling is seeded. The ready queue runs in an order drawn from a per-run
+PRNG, so a seed pins the whole interleaving. Time is virtual, so
+`asyncio.sleep(300)` costs nothing and timeouts fire in simulated seconds.
+
+The network is simulated as well. `open_connection`, `start_server` and
+datagram endpoints run over an in-memory packet core with per-link latency,
+drop and duplication, plus partitions and host crashes:
 
 ```python
 net = loop.net
@@ -232,95 +268,103 @@ loop.call_later(5.0, net.heal)                  # heals in virtual time
 net.crash("node2")                              # no reset, just silence
 ```
 
-- **Crashes with a way back** — `net.crash` kills a host's tasks and
-  binds, `net.restart` brings it back as a fresh incarnation, and
-  `host.disk` is a mapping that outlives both: machines die, reboot, and
-  remember what they wrote down. `net.set_disk(name, buffered=True,
-  torn=True)` makes the disk lie too — writes only land on `sync()`, and a
-  crash keeps a seeded prefix of whatever was still queued.
-- **Clocks that lie** — `net.set_clock(name, offset=...)` skews what one
-  host reads from the clock without changing how long anything takes, for
-  testing lease and timeout code against machines that disagree about the
-  time.
-- **Replayable traces** — every scheduling and fault decision lands in
-  an append-only trace whose hash proves a replay is exact.
-- **Seeded stand-ins** — `sim.random`, `sim.uuid4()` and `sim.time()`
-  draw from seed-derived streams inside a run and fall back to the
-  stdlib outside one, so code under test can use entropy and clocks
-  without breaking replay.
+A crashed host can come back. `net.crash` kills a host's tasks and binds,
+`net.restart` brings it back as a fresh incarnation, and `host.disk` is a
+mapping that outlives both, so machines die, reboot and remember what they
+wrote down. `net.set_disk(name, buffered=True, torn=True)` makes the disk
+misbehave too: writes only land on `sync()`, and a crash keeps a seeded
+prefix of whatever was still queued. `net.set_clock(name, offset=...)` skews
+what one host reads from the clock without changing how long anything takes,
+for testing lease and timeout code against machines that disagree about the
+time.
 
-## Proving it: the demos
+Every scheduling and fault decision lands in an append-only trace, and two
+runs with the same trace hash made the same decisions in the same order.
+Code under test can still use randomness and clocks: `sim.random`,
+`sim.uuid4()` and `sim.time()` draw from seed-derived streams inside a run
+and fall back to the standard library outside one.
 
-`examples/jobqueue/` is a complete distributed system — an exactly-once
-job scheduler (leases, fencing tokens, idempotency keys, backoff, and
-dead-lettering) written in plain asyncio — tested end to end with
-simloop. Its suite runs hundreds of seeds of partitions, crashes, and
-poison jobs, and shows that removing any load-bearing safeguard produces
-a violation the explorer finds and replays from a seed. The bug table
-lives in [examples/jobqueue/README.md](https://github.com/dhruvl/simloop/blob/main/examples/jobqueue/README.md).
+## Two demos
 
-`examples/raft/` is the second proof: a teaching-sized Raft — leader
-election and log replication in plain asyncio on streams — swept under
-50,000 seeds of partitions, crashed-and-restarted processes, and message
-loss. Four safety invariants hold on every seed; remove any safeguard
-(the vote ledger, the log-freshness check, the commit gate,
-persistence-before-reply, stale-term rejection) and the explorer finds a
-seed-replayable violation, then minimizes the failing schedule to the
-steps that had to go a particular way — one step out of 3,514 recorded, in
-the sharpest case. The table lives in
+`examples/jobqueue/` is a complete distributed system in plain asyncio: an
+exactly-once job scheduler with leases, fencing tokens, idempotency keys,
+backoff and dead-lettering, tested end to end with simloop. Its suite runs
+hundreds of seeds of partitions, crashes and poison jobs, plus six
+hand-picked mutations that each switch off one safeguard. The explorer finds
+a violation for every one of them and replays it from a seed. The bug table
+is in [examples/jobqueue/README.md](https://github.com/dhruvl/simloop/blob/main/examples/jobqueue/README.md).
+
+`examples/raft/` is a teaching-sized Raft, leader election and log
+replication in plain asyncio on streams, swept under 50,000 seeds of
+partitions, crashed-and-restarted processes and message loss. Four safety
+invariants hold under every schedule the explorer reaches. Switch off one of
+the vote ledger, the log-freshness check, the commit gate,
+persistence-before-reply or stale-term rejection and the explorer finds a
+seed-replayable violation, then minimizes the failing schedule to the steps
+that had to go a particular way. In the sharpest case that is one step out
+of 3,514. The table is in
 [examples/raft/README.md](https://github.com/dhruvl/simloop/blob/main/examples/raft/README.md).
 
 ## Performance
 
-Simulation is cheap: SimLoop schedules a task step in ~4.5 µs (trace
-recording included — about 3.7× faster than the stock loop, which pays a
-selector syscall per iteration), compresses sleep-heavy workloads ~2,000×
-against wall clock, and with `--simloop-jobs` fanning seeds across
-processes, the full jobqueue chaos scenario sweeps 100,000 seeds in just
-over four minutes (~390 seeds/second) on an M4 MacBook Air. Methodology, numbers,
-and the campaign results:
+Replayable scheduling costs nothing at test time. On a ring of 100 tasks
+passing a token, SimLoop spends 4.49 µs of CPU per scheduling step, trace
+recording included, against 5.18 µs for the stock loop and 3.44 µs for
+uvloop. By wall clock it finishes in under a third of the time either real
+loop takes, because on macOS both of them wait in kqueue on every iteration
+and SimLoop never makes that call. That is a saving at test time, not a
+faster event loop: uvloop still does less work per step.
+
+Virtual time compresses sleep-heavy workloads about 2,000× against wall
+clock (1,775–2,040× across nine runs). The jobqueue chaos scenario runs at
+about 55 seeds/s in one process (300 seeds in 5.2–6.3 s across nine runs).
+Across ten processes a 100,000-seed sweep takes 3.5–3.8 minutes, 443–473
+seeds/s over three runs: 8.7 times one process, on a laptop with four
+performance cores and six efficiency cores. All of it was measured on an M4
+MacBook Air in one sitting, and wall-clock throughput there moves by double
+digits between sittings; the methodology and the reasons are in
 [benchmarks/README.md](https://github.com/dhruvl/simloop/blob/main/benchmarks/README.md).
 
-## Honest limits
+## Limits
 
-Code that goes through the event-loop API is supported; code that
-bypasses it is fenced: threads, raw socket reads and writes,
-subprocesses and signals raise `SimulationFenceError` rather than
-silently breaking determinism.
-Executor submissions stay inside the line: `run_in_executor` runs the
-function inline at a seeded scheduling step — no pool, no thread — so
-`asyncio.to_thread` works, and `call_soon_threadsafe` is `call_soon`
-when the caller is the loop's own thread, while a real second thread
-still fences.
-`sock_connect` on an `AF_INET` stream socket is the exception — it is
-simulated, so a client that connects a socket and hands it to
-`create_connection` runs, while the datagram and raw variants still fence.
-Name resolution stays inside the simulation: `getaddrinfo` resolves sim
-host names to stable synthetic addresses and raises `socket.gaierror` for
-anything else — no real DNS, ever.
-TLS runs inside the simulation: a real handshake through the standard
-library's `SSLProtocol` over a pair of memory BIOs, with real certificate
-verification, no descriptor and no wall clock — each flight is one
-simulated packet paying the link's latency, and a handshake deadline fires
-in virtual time.
-Write-side flow control is simulated on request: `net.set_flow_control()`
-makes `drain()` really wait while the peer has not read, so backpressure
-deadlocks and missing pause/resume handling become findable. It is off by
-default, so a run that does not ask for it decides exactly what it decided
-before.
+Code that goes through the event-loop API is supported. Code that bypasses
+it is fenced: threads, raw socket reads and writes, subprocesses and signals
+raise `SimulationFenceError` rather than silently breaking determinism.
+
+A few things that look as if they would fence do not. `run_in_executor` runs
+the function inline at a seeded scheduling step, with no pool and no thread,
+so `asyncio.to_thread` works. `call_soon_threadsafe` is `call_soon` when the
+caller is the loop's own thread, while a real second thread still fences.
+`sock_connect` on an `AF_INET` stream socket is simulated, so a client that
+connects a socket and hands it to `create_connection` runs; the datagram and
+raw variants still fence. `getaddrinfo` resolves sim host names to stable
+synthetic addresses and raises `socket.gaierror` for anything else, and no
+real DNS lookup is ever made.
+
+TLS runs a real handshake through the standard library's `SSLProtocol` over
+a pair of memory BIOs, with real certificate verification and no descriptor
+or wall clock. Each flight is one simulated packet paying the link's latency,
+and a handshake deadline fires in virtual time. Write-side flow control is
+simulated on request: `net.set_flow_control()` makes `drain()` wait while the
+peer has not read, so backpressure deadlocks and missing pause/resume
+handling become findable. It is off by default, and a run that does not ask
+for it makes the same decisions it always did.
+
 The full contract is in [docs/supported-api.md](https://github.com/dhruvl/simloop/blob/main/docs/supported-api.md).
-What that contract costs real libraries — what aiohttp, anyio, websockets and
-httpx actually do under simulation, measured rather than promised — is in
-[docs/compatibility.md](https://github.com/dhruvl/simloop/blob/main/docs/compatibility.md).
+[docs/compatibility.md](https://github.com/dhruvl/simloop/blob/main/docs/compatibility.md) records what aiohttp,
+anyio, websockets and httpx actually do when run under simulation.
 
 ## Design
 
-Why the loop is a from-scratch `AbstractEventLoop` instead of an
-instrumented stock loop, why one seed feeds three separate RNG streams,
-why streams never lose bytes but datagrams do — the decisions and the
-alternatives they beat are written up in
+The simulated loop is one file, about 600 lines of code implementing
+`AbstractEventLoop` from scratch rather than instrumenting the stock loop.
+Why it was built that way, why one seed feeds three separate RNG streams,
+why streams never lose bytes but datagrams do: the decisions, and the
+alternatives they beat, are written up in
 [docs/design.md](https://github.com/dhruvl/simloop/blob/main/docs/design.md).
 
 ## License
 
-MIT
+MIT. Maintained by Dhruv Kumar Singh; see
+[CONTRIBUTING.md](https://github.com/dhruvl/simloop/blob/main/CONTRIBUTING.md) to send a change and
+[SECURITY.md](https://github.com/dhruvl/simloop/blob/main/SECURITY.md) to report a vulnerability.

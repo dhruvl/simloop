@@ -1,7 +1,7 @@
 # Supported asyncio subset
 
 simloop runs real, unmodified asyncio code on a simulated event loop. This
-page is the honest contract: what is simulated, what works unchanged on top,
+page is the contract: what is simulated, what works unchanged on top,
 and what is fenced off because it would escape the simulation and break
 determinism. Fenced APIs raise `SimulationFenceError` (a subclass of
 `NotImplementedError`) naming the offending call.
@@ -17,71 +17,71 @@ determinism. Fenced APIs raise `SimulationFenceError` (a subclass of
 | `run_until_complete` / `run_forever` / `stop` / `close` | Deadlock detection: raises `SimulationDeadlockError` when nothing can run |
 | Handle / timer cancellation | Honored and recorded in the scheduling trace |
 | Exception handling | Unhandled failures fail the run at `run_until_complete`; `set_exception_handler` supported |
-| `loop.run_in_executor` | The function runs inline at a scheduled step, not on a thread: the submission is an ordinary ready-queue entry — labelled `executor:<function>` in the trace — so the seeded draw orders it against everything else, and it costs no virtual time. Its result or exception lands on the returned future the way an executor worker would land it, and cancelling the future before the step runs means the function never runs. The `executor` argument is never used: there is no pool and nothing runs concurrently. `asyncio.to_thread` reaches the loop through this call, so it works; `anyio.to_thread` does not — it spawns real worker threads through no loop API, so no fence can catch the escape at the source: the worker's report back is a cross-thread `call_soon_threadsafe` that does fence, but whether a run sees that fence, hangs, or hits its own timeout first is a race between a real thread and a virtual clock. A function that blocks waiting for loop progress hangs the run rather than deadlocking detectably |
-| `loop.call_soon_threadsafe` | From the loop's own thread it is `call_soon` — which is all it ever was without a second thread involved. From any other thread it fences: a real thread's timing is outside the simulation |
+| `loop.run_in_executor` | The function runs inline at a scheduled step, not on a thread: the submission is an ordinary ready-queue entry, labelled `executor:<function>` in the trace, so the seeded draw orders it against everything else, and it costs no virtual time. Its result or exception lands on the returned future the way an executor worker would land it, and cancelling the future before the step runs means the function never runs. The `executor` argument is never used: there is no pool and nothing runs concurrently. `asyncio.to_thread` reaches the loop through this call, so it works; `anyio.to_thread` does not: it spawns real worker threads through no loop API, so no fence can catch the escape at the source: the worker's report back is a cross-thread `call_soon_threadsafe` that does fence, but whether a run sees that fence, hangs, or hits its own timeout first is a race between a real thread and a virtual clock. A function that blocks waiting for loop progress hangs the run rather than deadlocking detectably |
+| `loop.call_soon_threadsafe` | From the loop's own thread it is `call_soon`, which is all it ever was without a second thread involved. From any other thread it fences: a real thread's timing is outside the simulation |
 | `sim.random` / `sim.uuid4` / `sim.time` | Seed-derived streams inside a run; stdlib fallback outside |
 
 ## Works unchanged on top of the loop
 
 `asyncio.Queue`, `asyncio.Event`, `asyncio.Lock`, `asyncio.Semaphore`,
-`asyncio.gather`, `asyncio.TaskGroup`, `asyncio.timeout`, `asyncio.wait_for`
-— everything built purely on futures, tasks and timers. Timeouts fire in
+`asyncio.gather`, `asyncio.TaskGroup`, `asyncio.timeout`, `asyncio.wait_for`:
+everything built purely on futures, tasks and timers. Timeouts fire in
 virtual time. Each of these claims is exercised by the test suite.
 
 ## Simulated network
 
 Networking runs over an in-memory packet layer with seeded fault injection.
-Hosts are named machines; a task started via `loop.net.host("name").create_task(...)`
-— and every task it spawns — belongs to that host. Tasks never started under
+Hosts are named machines; a task started via `loop.net.host("name").create_task(...)`,
+and every task it spawns, belongs to that host. Tasks never started under
 a host belong to an implicit `driver` host.
 
 | API | Behavior under simulation |
 |---|---|
 | `loop.create_connection` / `create_server`, `asyncio.open_connection` / `start_server` | Real transports and protocols over reliable, ordered in-memory streams; connecting costs one round trip of virtual latency; connecting to a closed port raises `ConnectionRefusedError` |
-| `loop.create_connection(ssl=...)` / `create_server(ssl=...)`, `asyncio.open_connection(ssl=...)` / `start_server(ssl=...)` | A real TLS handshake, driven by the standard library's `SSLProtocol` over a pair of memory BIOs. No descriptor and no real socket anywhere: each flight OpenSSL produces leaves as one ordinary simulated packet and pays the link's seeded latency, so a client connect costs two round trips — one for the connection, one for the handshake — which is what a real TCP + TLS 1.3 connect costs. Verification is the real thing: a hostname the certificate does not cover raises `ssl.SSLCertVerificationError`. `ssl=True` means the standard library's default client context, which trusts the system store and therefore rejects a simulation's own certificate; on a server it is a `ValueError` when the listener is created, since there is no default certificate to present. A handshake a client fails is reset and does not fail the run |
-| `loop.start_tls` | Upgrades an established simulated connection in place and returns the new transport the protocol should write to — including the server-side case where the stream reader has already buffered the bytes the handshake needs |
+| `loop.create_connection(ssl=...)` / `create_server(ssl=...)`, `asyncio.open_connection(ssl=...)` / `start_server(ssl=...)` | A real TLS handshake, driven by the standard library's `SSLProtocol` over a pair of memory BIOs. No descriptor and no real socket anywhere: each flight OpenSSL produces leaves as one ordinary simulated packet and pays the link's seeded latency, so a client connect costs two round trips (one for the connection, one for the handshake), which is what a real TCP + TLS 1.3 connect costs. Verification is the real thing: a hostname the certificate does not cover raises `ssl.SSLCertVerificationError`. `ssl=True` means the standard library's default client context, which trusts the system store and therefore rejects a simulation's own certificate; on a server it is a `ValueError` when the listener is created, since there is no default certificate to present. A handshake a client fails is reset and does not fail the run |
+| `loop.start_tls` | Upgrades an established simulated connection in place and returns the new transport the protocol should write to, including the server-side case where the stream reader has already buffered the bytes the handshake needs |
 | `ssl_handshake_timeout` / `ssl_shutdown_timeout` | Ordinary loop timers, so they fire in virtual time at the standard library's defaults of 60 s and 30 s. A handshake a partition stalls costs sixty virtual seconds and milliseconds of wall clock, and raises `ConnectionAbortedError` |
 | `transport.get_extra_info` on a TLS transport | `ssl_object`, `peercert`, `cipher`, `compression` and `sslcontext` come from the TLS layer; `socket`, `peername` and `sockname` fall through to the simulated transport underneath, so the stand-in socket row below still applies |
 | `loop.create_datagram_endpoint` | Unreliable messaging: per-link drop, duplication, and latency apply per datagram |
 | `loop.net.set_defaults` / `set_link` | Per-direction latency ranges, drop and duplication probabilities, drawn from a seed-derived stream |
-| `loop.net.partition` / `heal` | Silent blackhole: datagrams are lost, stream traffic is held and resumes intact after healing; nothing errors — only your own timeouts fire |
-| `loop.net.crash` | A host's tasks are cancelled and it goes silent; no reset is sent — peers cannot tell a crash from a partition |
-| `loop.net.restart` / `host.restart()` | The counterpart to a crash: the host comes back as a fresh incarnation. Liveness is all that is revived — the old tasks stay cancelled, its listeners and binds are gone, and the caller boots whatever should run on the machine again, the same way it booted it the first time. Cancellation is requested at crash and lands on the next scheduler step, so a restart in the same step can briefly coexist with a dying task that swallows `CancelledError`. A packet is checked against liveness when it arrives, so traffic due during the dead window is lost; a packet that was already in flight and lands after the machine is back is delivered, and finds a host that no longer holds the old incarnation's connections. Peers still learn about the outage only from their own timeouts |
+| `loop.net.partition` / `heal` | Silent blackhole: datagrams are lost, stream traffic is held and resumes intact after healing; nothing errors, and only your own timeouts fire |
+| `loop.net.crash` | A host's tasks are cancelled and it goes silent; no reset is sent, so peers cannot tell a crash from a partition |
+| `loop.net.restart` / `host.restart()` | The counterpart to a crash: the host comes back as a fresh incarnation. Liveness is all that is revived: the old tasks stay cancelled, its listeners and binds are gone, and the caller boots whatever should run on the machine again, the same way it booted it the first time. Cancellation is requested at crash and lands on the next scheduler step, so a restart in the same step can briefly coexist with a dying task that swallows `CancelledError`. A packet is checked against liveness when it arrives, so traffic due during the dead window is lost; a packet that was already in flight and lands after the machine is back is delivered, and finds a host that no longer holds the old incarnation's connections. Peers still learn about the outage only from their own timeouts |
 | `host.disk` | Storage that survives the crash: a `MutableMapping` per host, where state a real process would fsync belongs. By default a write is durable the moment it is made. Values are stored as given, so mutating a stored object afterwards is the caller's own aliasing, exactly as with a cache in front of a real disk. `disk.sync()` exists on every disk and does nothing on one that does not buffer, so the code under test is written the same way either way |
-| `loop.net.set_disk` | Makes a host's disk lie about when a write lands. `buffered=True` queues writes and deletes in order and only makes them durable on `sync()`; reads on that host see the queue merged over what is durable, in a fixed order — durable keys where the durable state has them, then the keys the queue invented, in write order, with a queued delete hiding a key. A crash throws the queue away and the reboot finds what was synced; with `torn=True` a seeded prefix of the queue survives instead, which is the state a machine that lost power part-way through a batch comes back with. A prefix is the whole model: writes never land out of order, and no value is ever half-written. Tearing needs a buffer to tear (`torn=True` alone is a `ValueError`), and reconfiguring a disk flushes whatever it was holding. The prefix is drawn from a seed-derived stream of its own, so a torn run makes exactly the network draws it would have made untorn, and a run that never calls `set_disk` draws nothing and records nothing — storage is not a scheduling event and has no trace events at all |
-| `loop.net.set_clock` / `clock_offset` | Per-host clock skew, in seconds. The offset changes what that host's tasks *read*: `loop.time()` (and `sim.time()` with it) returns true time plus the offset, and a deadline handed to `call_at` is interpreted on the calling task's clock. Durations are immune — `asyncio.sleep`, `asyncio.timeout`, `wait_for` and `call_later` cost the same everywhere, which is exactly what a wrong wall clock does to a real machine. By default the driver and unconfigured hosts read true time; the driver can be given an offset too. Trace timestamps stay on the true clock, so skew never perturbs scheduling and traces from skewed runs stay comparable |
-| `loop.net.set_flow_control` / `transport.set_write_buffer_limits` | Makes writes push back when the peer is not keeping up. A stream transport's write buffer holds every byte it has written that the peer's protocol has not received yet — still in flight, held by a partition, waiting behind an earlier sequence number, or parked because the peer called `pause_reading()`. So a slow reader, a cut link and a dead peer all apply backpressure. Crossing `high` calls `pause_writing()` on the protocol and dropping back to `low` calls `resume_writing()`; both happen synchronously, from the write and from the peer's read, so `drain()` really waits and no scheduling event of its own is added. Marks default to the standard library's `(low=16 KiB, high=64 KiB)`, settable network-wide here and per transport with `set_write_buffer_limits(high, low)`, which derives and validates them exactly as the stdlib does (a `high` below `low` is a `ValueError`). **Off until `loop.net.set_flow_control()` says otherwise**: a transport's own `set_write_buffer_limits` records numbers without enforcing them until then, because libraries set them uninvited — anyio sets limits on every stream, websockets on every connection — and upgrading should not deadlock a workload nobody changed. With the switch off `get_write_buffer_size()` reports `0`, which is honest: nothing is charged and writes leave immediately. Honest divergence from TCP: the buffer drains when the peer's *application* receives the bytes, with no read-ahead, so simulated backpressure is strictly tighter than real backpressure — which is what makes a slow consumer visibly slow. A crashed peer sends no reset, so a writer paused against one stays paused until its own timeout fires, exactly as a real sender does. Datagram endpoints have no write buffer at all |
+| `loop.net.set_disk` | Makes a host's disk lie about when a write lands. `buffered=True` queues writes and deletes in order and only makes them durable on `sync()`; reads on that host see the queue merged over what is durable, in a fixed order: durable keys where the durable state has them, then the keys the queue invented, in write order, with a queued delete hiding a key. A crash throws the queue away and the reboot finds what was synced; with `torn=True` a seeded prefix of the queue survives instead, which is the state a machine that lost power part-way through a batch comes back with. A prefix is the whole model: writes never land out of order, and no value is ever half-written. Tearing needs a buffer to tear (`torn=True` alone is a `ValueError`), and reconfiguring a disk flushes whatever it was holding. The prefix is drawn from a seed-derived stream of its own, so a torn run makes exactly the network draws it would have made untorn, and a run that never calls `set_disk` draws nothing and records nothing, because storage is not a scheduling event and has no trace events at all |
+| `loop.net.set_clock` / `clock_offset` | Per-host clock skew, in seconds. The offset changes what that host's tasks *read*: `loop.time()` (and `sim.time()` with it) returns true time plus the offset, and a deadline handed to `call_at` is interpreted on the calling task's clock. Durations are immune: `asyncio.sleep`, `asyncio.timeout`, `wait_for` and `call_later` cost the same everywhere, which is exactly what a wrong wall clock does to a real machine. By default the driver and unconfigured hosts read true time; the driver can be given an offset too. Trace timestamps stay on the true clock, so skew never perturbs scheduling and traces from skewed runs stay comparable |
+| `loop.net.set_flow_control` / `transport.set_write_buffer_limits` | Makes writes push back when the peer is not keeping up. A stream transport's write buffer holds every byte it has written that the peer's protocol has not received yet, whether still in flight, held by a partition, waiting behind an earlier sequence number, or parked because the peer called `pause_reading()`. So a slow reader, a cut link and a dead peer all apply backpressure. Crossing `high` calls `pause_writing()` on the protocol and dropping back to `low` calls `resume_writing()`; both happen synchronously, from the write and from the peer's read, so `drain()` really waits and no scheduling event of its own is added. Marks default to the standard library's `(low=16 KiB, high=64 KiB)`, settable network-wide here and per transport with `set_write_buffer_limits(high, low)`, which derives and validates them exactly as the stdlib does (a `high` below `low` is a `ValueError`). **Off until `loop.net.set_flow_control()` says otherwise**: a transport's own `set_write_buffer_limits` records numbers without enforcing them until then, because libraries set them uninvited (anyio sets limits on every stream, websockets on every connection) and upgrading should not deadlock a workload nobody changed. With the switch off `get_write_buffer_size()` reports `0`, which is accurate: nothing is charged and writes leave immediately. Divergence from TCP: the buffer drains when the peer's *application* receives the bytes, with no read-ahead, so simulated backpressure is strictly tighter than real backpressure, which is what makes a slow consumer visibly slow. A crashed peer sends no reset, so a writer paused against one stays paused until its own timeout fires, exactly as a real sender does. Datagram endpoints have no write buffer at all |
 | `transport.abort()` | Peer gets `connection_lost(ConnectionResetError)` |
-| `loop.getaddrinfo` | Resolves against the host table, never DNS: a registered host name, its synthetic address, or a loopback-shaped name (`None`, `""`, `localhost`, `127.0.0.1`, `0.0.0.0`) meaning the calling task's own host. Returns stdlib-shaped rows — `(AF_INET, SOCK_STREAM, IPPROTO_TCP, "", (address, port))` and the `SOCK_DGRAM` / `IPPROTO_UDP` row — filtered by `family`, `type` and `proto`. Ports are numeric (`int`, a digit string, or `None` for 0); resolver `flags` have nothing to vary |
+| `loop.getaddrinfo` | Resolves against the host table, never DNS: a registered host name, its synthetic address, or a loopback-shaped name (`None`, `""`, `localhost`, `127.0.0.1`, `0.0.0.0`) meaning the calling task's own host. Returns stdlib-shaped rows, `(AF_INET, SOCK_STREAM, IPPROTO_TCP, "", (address, port))` and the `SOCK_DGRAM` / `IPPROTO_UDP` row, filtered by `family`, `type` and `proto`. Ports are numeric (`int`, a digit string, or `None` for 0); resolver `flags` have nothing to vary |
 | `loop.getnameinfo` | Reverse lookup: a synthetic address maps back to its host name, and a host name (what `get_extra_info("peername")` reports) maps to itself. `NI_NUMERICHOST` returns the address instead; services are always numeric |
-| `loop.net.address` / `hostname` | The mapping itself: every registered host owns one synthetic IPv4 address from `10.7.0.0/16` — `10.7.0.1`, `10.7.0.2`, ... handed out in registration order, starting with the implicit `driver` host |
-| `loop.sock_connect` + `create_connection(sock=...)` | The two-call connect sequence aiohttp's connector performs. On an `AF_INET` stream socket, `sock_connect` places the target in the host table and records it against the socket — no packet moves and no virtual time passes, and an address that is not a `(host, port)` pair, or a target the host table cannot place, raises `OSError` there. `create_connection(sock=...)` then claims that recorded address: it closes the real descriptor (the loop takes ownership, as the stdlib does) and opens a simulated connection, paying the same one round trip a direct connect pays, so a closed port raises `ConnectionRefusedError` from this call rather than the first. Passing a socket that no `sock_connect` on this loop parked raises `OSError`; passing `host`/`port` alongside `sock` raises `ValueError`. Binding a source address first — `TCPConnector(local_addr=...)` — is not supported: the connector binds the real socket before the simulation is consulted, and a synthetic address belongs to no real interface, so the bind fails outside the loop |
-| `transport.get_extra_info("socket")` (streams) | A stand-in object, not a network socket: `family` / `type` / `proto` report `AF_INET` / `SOCK_STREAM` / `IPPROTO_TCP`, `getsockname()` and `getpeername()` return `(synthetic address, port)` tuples for the two ends, and `setsockopt`, `shutdown` and `close` are accepted and do nothing. `fileno()` returns a parked descriptor the transport owns, created on first call, that polls unreadable while the peer is alive and readable once the peer's EOF arrives — which is how a pool that checks readability sees a dead connection. A reset, a local close or the end of the run closes the descriptor instead, and `fileno()` reports `-1` from then on; a readability poll reads that as dead too. The number itself is assigned by the operating system, so it is not reproducible across runs and is outside the determinism guarantee — nothing in a trace depends on it. No bytes ever cross it: `recv`, `send` and anything else not listed above raise `AttributeError` rather than pretend. Datagram transports still report `None` |
+| `loop.net.address` / `hostname` | The mapping itself: every registered host owns one synthetic IPv4 address from `10.7.0.0/16` (`10.7.0.1`, `10.7.0.2`, ... handed out in registration order, starting with the implicit `driver` host |
+| `loop.sock_connect` + `create_connection(sock=...)` | The two-call connect sequence aiohttp's connector performs. On an `AF_INET` stream socket, `sock_connect` places the target in the host table and records it against the socket; no packet moves and no virtual time passes, and an address that is not a `(host, port)` pair, or a target the host table cannot place, raises `OSError` there. `create_connection(sock=...)` then claims that recorded address: it closes the real descriptor (the loop takes ownership, as the stdlib does) and opens a simulated connection, paying the same one round trip a direct connect pays, so a closed port raises `ConnectionRefusedError` from this call rather than the first. Passing a socket that no `sock_connect` on this loop parked raises `OSError`; passing `host`/`port` alongside `sock` raises `ValueError`. Binding a source address first (`TCPConnector(local_addr=...)`) is not supported: the connector binds the real socket before the simulation is consulted, and a synthetic address belongs to no real interface, so the bind fails outside the loop |
+| `transport.get_extra_info("socket")` (streams) | A stand-in object, not a network socket: `family` / `type` / `proto` report `AF_INET` / `SOCK_STREAM` / `IPPROTO_TCP`, `getsockname()` and `getpeername()` return `(synthetic address, port)` tuples for the two ends, and `setsockopt`, `shutdown` and `close` are accepted and do nothing. `fileno()` returns a parked descriptor the transport owns, created on first call, that polls unreadable while the peer is alive and readable once the peer's EOF arrives, which is how a pool that checks readability sees a dead connection. A reset, a local close or the end of the run closes the descriptor instead, and `fileno()` reports `-1` from then on; a readability poll reads that as dead too. The number itself is assigned by the operating system, so it is not reproducible across runs and is outside the determinism guarantee; nothing in a trace depends on it. No bytes ever cross it: `recv`, `send` and anything else not listed above raise `AttributeError` rather than pretend. Datagram transports still report `None` |
 
 Names and their synthetic addresses are interchangeable wherever an endpoint
 is accepted, so a client can resolve a name and connect to what it got back.
-Anything the host table cannot answer — an unknown name, an unassigned
-address, an `AF_INET6` or `SOCK_RAW` request, a service name — raises
+Anything the host table cannot answer (an unknown name, an unassigned
+address, an `AF_INET6` or `SOCK_RAW` request, a service name) raises
 `socket.gaierror(EAI_NONAME)`. Resolution is a pure lookup, not a scheduling
 decision: it never blocks and records no trace event.
 
 Partitions, crashes and reboots are all silent, so time is the only
-failure detector the code under test has — and `set_clock` lets that
+failure detector the code under test has, and `set_clock` lets that
 detector be wrong. A lease holder whose clock runs fast and an issuer
 whose clock runs slow disagree about when the lease expired, which is the
 disagreement leases exist to survive, and a test can produce it on
 purpose. The converse is worth knowing before reaching for it: a protocol
 that puts durations on the wire rather than timestamps is immune to skew
-by construction — in `examples/jobqueue/` only the broker reads a clock,
+by construction. In `examples/jobqueue/` only the broker reads a clock,
 so skewing a worker changes nothing the cluster decides. Clock faults
 reach only code that compares timestamps taken on different machines.
 
-Limitations, stated honestly: there is no retransmission or congestion model
-— streams are reliable by construction; addressing is IPv4-only and entirely
-synthetic — there are no routes, no netmasks, and no service-name database;
+Limitations: there is no retransmission or congestion model, because
+streams are reliable by construction; addressing is IPv4-only and entirely
+synthetic, with no routes, no netmasks, and no service-name database;
 TLS has no half-close, so `write_eof()` on a TLS transport raises
 `NotImplementedError` and `can_write_eof()` is `False`, exactly as on a real
-one; and DTLS is not simulated — datagram endpoints take no TLS arguments.
+one; and DTLS is not simulated, so datagram endpoints take no TLS arguments.
 
 ## Fenced
 
@@ -91,8 +91,8 @@ signal handlers, subprocesses, file-descriptor callbacks (`add_reader` /
 `add_writer`), `sendfile`, pipes, and an eager task start
 (`create_task(eager_start=True)`), which would run a task's first step at
 creation time, before the seeded draw could order it against anything.
-Executor *submissions* are not in that list — `run_in_executor` runs the
-function inline, as the table above says — but the pool machinery around
+Executor *submissions* are not in that list (`run_in_executor` runs the
+function inline, as the table above says), but the pool machinery around
 them still is: `set_default_executor` and `shutdown_default_executor`
 fence, because an executor that would never be used is refused rather than
 silently accepted. TLS is not in that list either, on either of its two
@@ -102,9 +102,9 @@ simulated peer that speaks TLS. What that means in practice is in
 [docs/compatibility.md](compatibility.md).
 
 The socket calls are fenced with one exception. `sock_connect` on an
-`AF_INET` stream socket is simulated — it is how client stacks reach the
+`AF_INET` stream socket is simulated, since it is how client stacks reach the
 network, and the table above says what it does. Every other socket kind
-fences there — datagram, raw and IPv6 alike — and the rest of the family
+fences there, whether datagram, raw or IPv6, and the rest of the family
 stays fenced outright: `sock_recv`, `sock_recv_into`, `sock_sendall`,
 `sock_sendto`, `sock_recvfrom`, `sock_recvfrom_into`, `sock_accept` and
 `sock_sendfile`. Client stacks do not need them: the socket they connect
@@ -113,14 +113,15 @@ is upgraded into a transport instead of being read and written directly.
 ## The trace
 
 Every scheduling decision and every network verdict is appended to a trace
-whose SHA-256 is what proves a replay was exact. `simloop.TraceEvent` is a
-`NamedTuple`, so an event compares and unpacks as `(kind, when, seq, label,
-host)`:
+whose SHA-256 is what two runs are compared by: equal hashes mean the same
+decisions in the same order, within the limits set out below.
+`simloop.TraceEvent` is a `NamedTuple`, so an event compares and unpacks as
+`(kind, when, seq, label, host)`:
 
 | field | what it holds |
 |---|---|
 | `kind` | `schedule`, `run`, `cancel`, `advance` or `net` |
-| `when` | virtual time, always on the true clock — `set_clock` changes what a host reads, never what a trace records |
+| `when` | virtual time, always on the true clock; `set_clock` changes what a host reads, never what a trace records |
 | `seq` | the scheduled handle's number; the packet's uid on a `net` event; `-1` on a clock advance |
 | `label` | the qualified callback name, or a network verb and the link it crossed (`send a>b`) |
 | `host` | the machine the event belongs to, or `""` for the simulation itself |
@@ -131,7 +132,7 @@ point: a wakeup that crosses machines is a `schedule` on one host and a `run`
 on another. Flow control is that shape exactly: it adds no packets and no
 scheduling events of its own, and what does appear is the wakeup of a writer
 that was waiting in `drain()`, scheduled by the host whose read released it. An empty host means the event belongs to the simulation rather
-than to any machine — a clock advance, which is global; the network's own
+than to any machine: a clock advance, which is global; the network's own
 delivery step, which happens on the wire between two machines rather than on
 either of them; and every `net` event, whose label already says which
 machines it concerns.
@@ -150,19 +151,19 @@ did reach the machine, and only then found nothing to take it. `crash` and
 
 Hashes are comparable within a version, not across versions: the host field
 and the `deliver` events are new in 0.2.0, so every workload's trace hashes
-differ from the ones 0.1.0 recorded — see the
-[changelog](changelog.md). What a hash promises is unchanged: same seed,
+differ from the ones 0.1.0 recorded (see the
+[changelog](changelog.md)). What a hash promises is unchanged: same seed,
 same code, same interpreter, same hash.
 
 TLS costs that promise one clause, and only for a workload that uses it. TLS
-records add no event kind — they are ordinary packets — but how many packets
+records add no event kind, since they are ordinary packets, but how many packets
 a handshake makes is a property of the TLS engine, so for such a workload the
 promise reads *same seed, same code, same interpreter, same OpenSSL build,
 same TLS configuration*. Certificates are not on that list, which is the
 reassuring half and is measured: an EC leaf and an RSA leaf record the
 same hash, because the trace hashes the number and order of packets and never
 their bytes, and the TLS engine emits exactly one write per flight. What does
-move it is anything that changes the flight structure — `SSLContext.num_tickets`
+move it is anything that changes the flight structure: `SSLContext.num_tickets`
 (setting it to 0 drops one server packet from a connection that stays open
 long enough to be sent its session tickets; raising it above the default of 2
 changes nothing, because they all leave in one write), a client certificate
@@ -171,7 +172,7 @@ never asks for TLS makes no new draw, arms no new timer and records no new
 event, which a pinned reference hash in the test suite keeps true.
 
 `simloop.timeline_html(events, limit=5000)` renders a trace as a
-self-contained HTML page — one lane per machine plus one for the simulation,
+self-contained HTML page with one lane per machine plus one for the simulation,
 a dot per scheduling decision, an arrow for every `send` its `deliver`
 answered, and a stub for every one that never arrived. Only the last `limit`
 events are drawn, and the page says so when it dropped any; `limit=None`
@@ -211,23 +212,23 @@ is demoted below every chain still holding its first draw. What that buys is
 a floor: a bug that needs `depth` scheduling constraints met in order is hit
 with probability at least 1/(n · horizon^(depth-1)) on *every* run, where n
 is the number of chains and the horizon is the step count the change points
-are spread over. Chains are priced as they turn up — an owner nobody has seen
+are spread over. Chains are priced as they turn up (an owner nobody has seen
 draws its priority on first sight, the standard adaptation for work created
-while the run is going — so n is however many chains the run ended up
+while the run is going), so n is however many chains the run ended up
 containing, not a count anyone knew in advance, and where tasks spawn tasks
 the bound is best read per run and after the fact. Uniform draws promise
 nothing at any depth.
 
 It is not a faster search, and the repository measures its own claim. On the
-planted lost-update race in `tests/test_explore.py` — two ordering
-constraints in a twelve-step run, searched at the default depth — uniform
+planted lost-update race in `tests/test_explore.py`, two ordering
+constraints in a twelve-step run searched at the default depth, uniform
 draws reached the first failing seed after 2.0 seeds on average and PCT after
 92.75, a failure rate of 474 seeds per 1,000 against 21. A shallow race in a
 short run is the shape a uniform draw is already ideal for. PCT is for the
 depth a uniform draw is unlikely to stumble into, and what it offers there is
 the bound, not a speed-up.
 
-The rest of the honest print:
+The rest of the fine print:
 
 - The guarantee is per run. Nothing here says how many runs a campaign needs,
   and a lower bound on a probability is not a promise that a search finds
@@ -236,8 +237,8 @@ The rest of the honest print:
   points cannot express the interleaving; too high and they spread thinner
   over the same run.
 - The horizon is measured rather than assumed: seed 0 runs once under the
-  seeded schedule, and its step count times 1.5 — floored at 100, and widened
-  further if `depth - 1` change points need the room — is the horizon. That
+  seeded schedule, and its step count times 1.5, floored at 100 and widened
+  further if `depth - 1` change points need the room, is the horizon. That
   measuring run is one extra run of the workload per exploration, unless seed
   0 is the only seed asked for: it runs the seeded schedule anyway, so there
   is nothing left to size. Seed 0 is also explored on its own account, always
@@ -250,7 +251,7 @@ The rest of the honest print:
   run that overruns spends all of them in its first `horizon` steps and
   finishes at fixed priorities. Both are legal schedules, and neither is the
   one the bound describes.
-- Callbacks no task owns — timers, protocol callbacks — are each a chain of
+- Callbacks no task owns, such as timers and protocol callbacks, are each a chain of
   their own that draws once and runs once. A change point landing on one
   spends a demotion on a chain with no future, so read the bound as a
   statement about runs where task chains do the deciding.

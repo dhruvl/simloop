@@ -1,12 +1,12 @@
-# jobqueue — an exactly-once job scheduler, proven by simloop
+# jobqueue: an exactly-once job scheduler, tested under simloop
 
 A demo distributed system written in plain asyncio (stdlib only, no simloop
 imports): one broker, stateless workers, submitting clients. Its test suite
-runs entirely under [simloop](../../README.md) — seeded scheduling, virtual
-time, simulated partitions and crashes — and every failure it can produce
-replays exactly from a seed.
+runs entirely under [simloop](../../README.md), with seeded scheduling, virtual
+time, simulated partitions and crashes, and every failure it has produced
+replays from its seed.
 
-## The claim, stated honestly
+## The claim
 
 Attempts are at-least-once; **effects commit exactly once**. Workers may
 re-run a job after a crash or an expired lease, but the fenced, idempotent
@@ -17,26 +17,27 @@ ends `done` (effect committed) or `dead` (dead-lettered after
 Mechanisms: time-based leases with heartbeat renewal, per-job monotonic
 fencing tokens checked at both broker and store, idempotency-key submit
 dedupe, exponential-backoff requeue, dead-letter state. Time is the only
-failure detector — under simloop a crashed peer sends no reset and a
+failure detector: under simloop a crashed peer sends no reset and a
 partition stalls silently, exactly like production.
 
 ## Invariants
 
 Checked after every simulated run (`tests/invariants.py`):
 
-1. **no-loss** — every acknowledged submit ends done or dead
-2. **exactly-once** — at most one accepted commit per job and per logical
+1. **no-loss**: every acknowledged submit ends done or dead
+2. **exactly-once**: at most one accepted commit per job and per logical
    submit; every done job has exactly one
-3. **no-zombie-writes** — no commit accepted from a superseded lease
-4. **convergence** — nothing left queued or leased at quiesce
+3. **no-zombie-writes**: no commit accepted from a superseded lease
+4. **convergence**: nothing left queued or leased at quiesce
 
 ## The numbers
 
 - Scenario suite: 7 scenarios × 25–50 seeds each, all green.
 - Campaign: **300 seeds** of randomized partitions, a worker crash, and
-  poison jobs per seed — invariants held on every seed.
-- Ablations: remove any load-bearing safeguard and the explorer finds a
-  violating schedule. Found-during-development bugs are listed too.
+  poison jobs per seed; invariants held on every seed.
+- Ablations: six hand-picked mutations, each switching off one safeguard,
+  and the explorer finds a violating schedule for every one. Bugs found
+  during development are listed too.
 
 | # | Safeguard removed / bug | Invariant violated | Found at seed | Seeds searched | Reproduce |
 |---|---|---|---|---|---|
@@ -47,15 +48,15 @@ Checked after every simulated run (`tests/invariants.py`):
 | 5 | Unbounded retries (`max_attempts=None`) | convergence | 0 | 1 | `... ::test_unbounded_attempts_never_converge_on_poison` |
 | 6 | Worker renewals off + store idempotency off | exactly-once | 0 | 1 | `... ::test_renew_off_paired_with_unidempotent_store_double_commits` |
 
-Rows 1–6 are labeled ablations — detection demonstrations, not bugs that
+Rows 1–6 are labeled ablations, detection demonstrations, not bugs that
 were ever shipped. Renewals off *alone* stays safe across 75 seeds
-(defense in depth); so does broker fencing alone — the store is the
-last line, and the suite proves both lines independently.
+(defense in depth); so does broker fencing alone, because the store is the
+last line, and the suite checks both lines independently.
 
 ## Run it
 
     uv run pytest examples/jobqueue/tests -q            # fast suite
-    uv run pytest examples/jobqueue/tests -q -m slow    # campaign + safety proofs
+    uv run pytest examples/jobqueue/tests -q -m slow    # campaign + safety checks
 
 Replay any sim-test failure exactly:
 

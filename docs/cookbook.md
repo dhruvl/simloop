@@ -6,8 +6,8 @@ repository. One so far.
 ## Hypothesis for the data, simloop for the schedule
 
 A concurrency bug usually needs two things to go wrong at once: a workload
-that can race — enough clients, the right payloads, a timeout short enough to
-matter — and an interleaving that makes it race. Property-based testing and
+that can race (enough clients, the right payloads, a timeout short enough to
+matter) and an interleaving that makes it race. Property-based testing and
 simulation testing each search one of those and neither searches the other.
 [Hypothesis](https://hypothesis.readthedocs.io/) generates and minimizes
 *data*; simloop enumerates *schedules* and replays the one that failed.
@@ -15,7 +15,7 @@ simulation testing each search one of those and neither searches the other.
 They compose without an integration layer. Hypothesis picks the workload,
 `explore()` runs that workload under a range of seeds, and the property is
 "no seed broke it". There is no simloop-Hypothesis package to install and
-nothing in simloop knows Hypothesis exists — the whole recipe is the shape of
+nothing in simloop knows Hypothesis exists. The whole recipe is the shape of
 one test function, which is why this is a cookbook page rather than a module.
 
 The worked example below is
@@ -25,7 +25,7 @@ which runs in simloop's CI on every commit.
 ### The workload
 
 Writers appending to one shared log, where appending is "read the length,
-then write at that index" — with an `await` in the gap, the way a real write
+then write at that index", with an `await` in the gap, the way a real write
 has network or disk in the middle:
 
 ```python
@@ -53,8 +53,8 @@ async def replicate(writers, payloads, delay, *, guarded):
     assert len(log) == expected, f"lost {expected - len(log)} of {expected} appends"
 ```
 
-Three parameters — how many writers, what they write, how long a write takes
-in virtual seconds — and one invariant: every append that started is in the
+Three parameters (how many writers, what they write, how long a write takes
+in virtual seconds) and one invariant: every append that started is in the
 log. `guarded=True` holds the lock across the reserve and the write, which is
 the fix.
 
@@ -87,7 +87,7 @@ Read it as one sentence: for every workload Hypothesis can build, none of the
 first `SEEDS` schedules loses an append. `explore()` returns a
 [`SeedReport`](supported-api.md#exploring-schedules) for the first seed that
 failed and `None` when they all passed, so the property is a plain `is None`
-and the report — failing seed, replay command, trace tail, schedule diff — is
+and the report (failing seed, replay command, trace tail, schedule diff) is
 the assertion message.
 
 Drop the lock (`guarded=False`) and the combination finds the bug, at which
@@ -110,7 +110,7 @@ and re-raises the first failure with the report attached; `@given` calls that
 test once per example. Use this form when you want the pytest options
 (`--simloop-seeds`, `--simloop-replay`, `--simloop-shrink`,
 `--simloop-timeline`) to reach the exploration; use the explicit `explore()`
-form when you want the report as a value — to assert on the failing seed, or
+form when you want the report as a value, to assert on the failing seed, or
 to keep exploring after one.
 
 One option does not survive the stack: `--simloop-jobs` refuses any test that
@@ -145,8 +145,8 @@ same trace hash.
 
 The one thing to know when you turn this into a regression test:
 `--simloop-replay=SEED` pins the schedule, not the example. To pin both, write
-the minimized workload down as an explicit case — `@example(writers=2)`, or a
-plain non-Hypothesis test calling `explore()` with those arguments — and keep
+the minimized workload down as an explicit case, `@example(writers=2)` or a
+plain non-Hypothesis test calling `explore()` with those arguments, and keep
 the property test for the search.
 
 ### Why the seed is not a strategy
@@ -157,11 +157,11 @@ both searches inside one shrinker, and they minimize incompatible things.
 - **A seed has no size.** Hypothesis shrinks toward smaller values because
   smaller usually means simpler, and for a seed it means nothing at all: a
   seed is an opaque index into the space of schedules, so seed 0 is not a
-  simpler failure than seed 8,172 — it is a different one, and usually one
+  simpler failure than seed 8,172; it is a different one, and usually one
   that does not reproduce. The shrinker spends its budget wandering between
   unrelated schedules instead of cutting down the workload.
 - **The property stops being a function.** With a fixed seed range, "this
-  workload fails" is deterministic — the same arguments always produce the
+  workload fails" is deterministic: the same arguments always produce the
   same verdict. Draw the seeds too and the same workload passes or fails
   depending on what was drawn, which is exactly the flakiness Hypothesis
   cannot shrink through: it will abandon a shrink it cannot reproduce and say
@@ -174,7 +174,7 @@ both searches inside one shrinker, and they minimize incompatible things.
 
 So: Hypothesis owns the data, `range(SEEDS)` owns the schedules, and the two
 shrinkers never meet. If a workload needs more schedule coverage, raise
-`SEEDS` (or `--simloop-seeds` in CI) — that is a knob, not a search space.
+`SEEDS` (or `--simloop-seeds` in CI). That is a knob, not a search space.
 
 ### Settings that matter
 
@@ -194,7 +194,7 @@ is then a pure function of the repository: a green run means something, and a
 red one reproduces on the first try.
 
 That is the CI story, not the only story. Locally, the database is worth
-having — it remembers the workload that failed and tries it first next time —
+having, since it remembers the workload that failed and tries it first next time,
 and dropping `derandomize` widens the search across runs. Both are reasonable
 in a nightly sweep. Neither belongs in a test that is supposed to give the
 same answer on every machine.
@@ -208,12 +208,12 @@ though: 500 examples over 1,000 seeds is half a million runs, so raise the two
 knobs deliberately and separately. More examples buys workload variety; more
 seeds buys schedule coverage for the workloads you already have.
 
-### Honest limits
+### Limits
 
 - The minimal example belongs to Hypothesis, and which minimum it reports can
   change when Hypothesis does. simloop's own test asserts on the exact
-  shrunk workload on purpose — that assertion is what proves the shrinking is
-  real — and the version is pinned in `uv.lock`. Asserting on a minimum is a
+  shrunk workload on purpose, because that assertion is what shows the shrinking
+  is real, and the version is pinned in `uv.lock`. Asserting on a minimum is a
   choice to make knowingly, not a default.
 - This page covers `@given`. Hypothesis's stateful testing drives its own
   run loop, and nothing here says what a `RuleBasedStateMachine` does on top
