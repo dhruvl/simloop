@@ -5,8 +5,9 @@ simulates. This page answers the next question — what happens when a real
 library runs on top of them — with evidence rather than intent: every row
 below is the output of a script anyone can re-run.
 
-Recorded **2026-08-04**, against simloop 0.2.0 (unreleased) on Python 3.12
-with OpenSSL 3.5.7.
+Recorded **2026-08-04**, against simloop 0.2.0 on Python 3.12 with OpenSSL
+3.5.7. 0.2.1 changed packaging metadata and nothing else, so these verdicts
+describe it too.
 
 ## What a probe is
 
