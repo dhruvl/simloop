@@ -20,7 +20,8 @@ _ROOT = Path(__file__).resolve().parent.parent
 
 # A shown line and a printed line are compared after stripping pytest's `E`
 # marker and surrounding whitespace, so indentation and the trailing blanks
-# of an empty host field do not count.
+# of an empty host field do not count. Backslashes read as forward slashes:
+# Windows prints a pending task's file path with its own separator.
 _E_MARKER = re.compile(r"^E(?: |$)")
 
 
@@ -49,7 +50,7 @@ def _example(page: str, test_name: str) -> tuple[str, str]:
 
 
 def _normalize(line: str) -> str:
-    return _E_MARKER.sub("", line).strip()
+    return _E_MARKER.sub("", line).strip().replace("\\", "/")
 
 
 def _assert_shows(shown: str, printed: list[str]) -> None:
