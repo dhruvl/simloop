@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.1 (unreleased)
+
+Packaging metadata only; no library code changed.
+
+- The PyPI page links the documentation site and the changelog. It pointed
+  only at the repository before, which left the site reachable from nothing
+  but prose in the README.
+- The package declares `Framework :: Pytest`, the classifier pytest's own
+  third-party plugin index is built from, and the quality-assurance topic.
+- Python 3.14 is declared. CI has run it since 0.2.0; the metadata had not
+  caught up.
+- The keywords name what people search for — race conditions, flaky tests,
+  fault injection — in place of `dst`, which collides with daylight saving
+  time.
+- The development status says beta. Two releases and a compatibility matrix
+  in, alpha undersold it.
+
 ## 0.2.0 (2026-08-13)
 
 The theme of the release is explanation: a failing seed now diffs itself

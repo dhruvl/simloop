@@ -1,28 +1,48 @@
 [project]
 name = "simloop"
-version = "0.2.0"
+version = "0.2.1"
 description = "Deterministic simulation testing for Python asyncio: seeded scheduling, virtual time, replayable failures"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Dhruv Kumar Singh", email = "singhdhruvk@gmail.com" }]
-keywords = ["asyncio", "testing", "deterministic", "simulation", "dst"]
+keywords = [
+    "asyncio",
+    "testing",
+    "pytest",
+    "deterministic",
+    "deterministic-simulation-testing",
+    "simulation",
+    "concurrency",
+    "race-condition",
+    "flaky-tests",
+    "fault-injection",
+    "distributed-systems",
+    "event-loop",
+]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Framework :: AsyncIO",
+    "Framework :: Pytest",
     "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Quality Assurance",
     "Topic :: Software Development :: Testing",
     "Typing :: Typed",
 ]
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/dhruvl/simloop"
+Homepage = "https://dhruvl.github.io/simloop/"
+Documentation = "https://dhruvl.github.io/simloop/"
 Repository = "https://github.com/dhruvl/simloop"
 Issues = "https://github.com/dhruvl/simloop/issues"
+Changelog = "https://github.com/dhruvl/simloop/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = ["pytest>=8", "mypy>=1.11", "hypothesis>=6", "trustme>=1.2"]
