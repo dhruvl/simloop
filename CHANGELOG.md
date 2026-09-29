@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.2 (unreleased)
+## 0.2.2 (2026-09-29)
 
 Documentation and benchmarks only; no library code changed, and every trace
 hash is the one 0.2.1 records.
